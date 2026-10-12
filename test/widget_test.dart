@@ -1,30 +1,38 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
+import 'package:chatwithalice/app.dart';
+import 'package:chatwithalice/di.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:chatwithalice/main.dart';
-
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('首页渲染默认会话 → 进入设置 → 保存设置', (tester) async {
+    // 全程使用内存适配器与假 AIClient，不触网、不建真实数据库。
+    await resetDependenciesForTest();
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await tester.pumpWidget(const ChatWithAliceApp());
+    await tester.pumpAndSettle();
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    // 首页应通过 ensureDefaultConversation 展示默认会话。
+    expect(find.text('AI助手'), findsOneWidget);
+
+    // 进入设置页。
+    await tester.tap(find.byIcon(Icons.settings));
+    await tester.pumpAndSettle();
+    expect(find.text('设置'), findsOneWidget);
+
+    // 保存设置并检查 SnackBar（按钮在竖屏下方，先滚动到可见处）。
+    final saveButton = find.text('保存设置');
+    await tester.ensureVisible(saveButton);
+    await tester.pumpAndSettle();
+    await tester.tap(saveButton);
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('设置已保存'), findsOneWidget);
+  });
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  testWidgets('清空依赖后仍可渲染首页（隔离性）', (tester) async {
+    await resetDependenciesForTest();
+    await tester.pumpWidget(const ChatWithAliceApp());
+    await tester.pumpAndSettle();
+    expect(find.text('Chat with Alice'), findsOneWidget);
   });
 }

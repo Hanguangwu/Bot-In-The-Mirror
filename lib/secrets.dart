@@ -1,1 +1,0 @@
-const openAIAPIKey = 'sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx';

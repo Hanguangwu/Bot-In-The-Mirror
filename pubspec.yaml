@@ -34,10 +34,19 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  # 字素簇处理：会话摘要按字素截断，避免切断 emoji / 组合字符（F11）
+  characters: ^1.4.1
+  # 本地数据库（M0 起），见 docs/产品与技术设计方案.md §6.1
+  drift: ^2.35.2
+  drift_flutter: ^0.3.1
+  # 依赖注入容器（M0）
+  get_it: ^9.3.0
   http: ^1.4.0
   intl: ^0.20.2
   provider: ^6.1.1
   shared_preferences: ^2.2.2
+  # 客户端 UUID 生成（实体 ID，M0 起）
+  uuid: ^4.6.0
 
 dev_dependencies:
   flutter_test:
@@ -49,6 +58,9 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+  # Drift 代码生成（M0）
+  build_runner: ^2.6.0
+  drift_dev: ^2.35.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

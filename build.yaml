@@ -1,0 +1,9 @@
+# 构建期代码生成配置。
+targets:
+  $default:
+    builders:
+      # Drift 代码生成（F1）：DateTime 以 ISO-8601 文本落库，保留亚秒精度，
+      # 避免同一秒内多条消息因整秒截断而乱序（schemaVersion=1，无历史数据，无迁移成本）。
+      drift_dev:drift_dev:
+        options:
+          store_date_time_values_as_text: true

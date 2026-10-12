@@ -1,32 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'screens/home_screen.dart';
-import 'services/ai_service.dart';
 
-void main() {
-  runApp(const MyApp());
-}
+import 'app.dart';
+import 'di.dart';
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (context) => AIService(),
-      child: MaterialApp(
-        debugShowCheckedModeBanner: false,
-        title: 'Chat with Alice',
-        theme: ThemeData(
-          primarySwatch: Colors.blue,
-          visualDensity: VisualDensity.adaptivePlatformDensity,
-          appBarTheme: const AppBarTheme(
-            backgroundColor: Colors.blue,
-            foregroundColor: Colors.white,
-          ),
-        ),
-        home: const HomeScreen(),
-      ),
-    );
-  }
+/// 应用入口：初始化绑定 → 装配依赖 → 启动 UI。
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await configureDependencies();
+  runApp(const ChatWithAliceApp());
 }
