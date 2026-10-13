@@ -6,12 +6,13 @@ import '../../domain/repositories/settings_store.dart';
 
 /// 内存设置存储。
 ///
-/// M0 阶段明文 API Key 仅保存在内存（存于 [AIProviderProfile.apiKeyRef]），
-/// 不写入数据库；后续版本改为平台安全存储引用。
+/// 明文 API Key 独立存放于内存，不再从 [AIProviderProfile.apiKeyRef] 读取。
+/// 兼容过渡：若初始 profile 携带 apiKeyRef，则同步至独立字段。
 class MemorySettingsStore implements SettingsStore {
   /// 创建内存设置存储，可选注入初始配置。
   MemorySettingsStore({AIProviderProfile? initialProfile})
-      : _profile = initialProfile ?? _defaultProfile();
+      : _profile = initialProfile ?? _defaultProfile(),
+        _apiKey = initialProfile?.apiKeyRef ?? '';
 
   static AIProviderProfile _defaultProfile() => const AIProviderProfile(
         name: '默认',
@@ -24,13 +25,14 @@ class MemorySettingsStore implements SettingsStore {
   final StreamController<AIProviderProfile> _controller =
       StreamController<AIProviderProfile>.broadcast();
   AIProviderProfile _profile;
+  String _apiKey;
 
   @override
   AIProviderProfile get currentProfile => _profile;
 
   /// 运行时明文 API Key，供 `AIClient` 读取；绝不落库。
   @override
-  String get apiKey => _profile.apiKeyRef ?? '';
+  String get apiKey => _apiKey;
 
   @override
   Stream<AIProviderProfile> watchProfile() => _controller.stream;
@@ -38,9 +40,19 @@ class MemorySettingsStore implements SettingsStore {
   @override
   Future<void> saveProfile(AIProviderProfile profile) async {
     _profile = profile;
+    if (profile.apiKeyRef != null && profile.apiKeyRef!.isNotEmpty) {
+      // 兼容 M0 设置页把 key 写进 apiKeyRef 的写法；
+      // Lane-C 起设置页改走 saveApiKey，profile.apiKeyRef 恒 null。
+      _apiKey = profile.apiKeyRef!;
+    }
     if (!_controller.isClosed) {
       _controller.add(profile);
     }
+  }
+
+  @override
+  Future<void> saveApiKey(String apiKey) async {
+    _apiKey = apiKey;
   }
 
   /// 释放内部流资源（仅测试/预览使用）。

@@ -92,3 +92,17 @@ class UnsupportedException extends AppException {
   const UnsupportedException(super.message, {super.cause})
       : super(code: 'unsupported');
 }
+
+/// AI 计划 JSON 解析或校验失败（未知变更类型、格式非法等）。
+class PlanValidationException extends AppException {
+  /// 创建计划校验异常。
+  const PlanValidationException(super.message, {super.cause})
+      : super(code: 'planInvalid');
+}
+
+/// 状态或数据冲突（目标不存在、状态不匹配等）。
+class ConflictException extends AppException {
+  /// 创建冲突异常。
+  const ConflictException(super.message, {super.cause})
+      : super(code: 'conflict');
+}

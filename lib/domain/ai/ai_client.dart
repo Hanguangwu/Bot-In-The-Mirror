@@ -59,6 +59,7 @@ class PlanRequest {
     required this.conversationId,
     required this.sourceMessageId,
     required this.request,
+    required this.profile,
   });
 
   /// 来源会话 ID。
@@ -69,6 +70,9 @@ class PlanRequest {
 
   /// 用户原始请求文本。
   final String request;
+
+  /// 使用的提供商配置（B1：拆解请求自带 profile）。
+  final AIProviderProfile profile;
 }
 
 /// AI 客户端接口。UI 依赖此接口，不直接依赖 HTTP 或具体模型。

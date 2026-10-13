@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'features/home/home_screen.dart';
+import 'features/home/home_shell.dart';
 
 /// 应用根组件。主题沿用 M0 之前的样式。
 class ChatWithAliceApp extends StatelessWidget {
@@ -20,7 +20,7 @@ class ChatWithAliceApp extends StatelessWidget {
           foregroundColor: Colors.white,
         ),
       ),
-      home: const HomeScreen(),
+      home: const HomeShell(),
     );
   }
 }

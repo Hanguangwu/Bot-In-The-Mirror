@@ -5,7 +5,6 @@ import '../../di.dart';
 import '../../domain/entities/conversation.dart';
 import '../../domain/repositories/conversation_repository.dart';
 import '../chat/chat_screen.dart';
-import '../settings/settings_screen.dart';
 
 /// 主页面：仓库流驱动的会话列表。
 class HomeScreen extends StatefulWidget {
@@ -31,13 +30,6 @@ class _HomeScreenState extends State<HomeScreen> {
       _repository.watchConversations();
 
   @override
-  void initState() {
-    super.initState();
-    // 首次启动保证存在默认会话（幂等）。
-    _repository.ensureDefaultConversation();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.blue.shade50,
@@ -47,19 +39,6 @@ class _HomeScreenState extends State<HomeScreen> {
           'Chat with Alice',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
-        actions: <Widget>[
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (context) => const SettingsScreen(),
-                ),
-              );
-            },
-          ),
-        ],
       ),
       body: StreamBuilder<List<Conversation>>(
         stream: _conversationsStream,
@@ -133,8 +112,6 @@ class _HomeScreenState extends State<HomeScreen> {
       _avatarColors[id.hashCode.abs() % _avatarColors.length];
 
   /// 显示「添加助手」对话框，确认后创建会话并进入。
-  ///
-  /// F5：仅保留名称输入——模型与头像颜色在创建会话时均未生效（无效控件），已移除。
   Future<void> _showAddBotDialog() async {
     final nameController = TextEditingController();
     final String title =

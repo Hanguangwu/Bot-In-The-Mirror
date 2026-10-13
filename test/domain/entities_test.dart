@@ -1,3 +1,4 @@
+import 'package:chatwithalice/core/errors/app_exception.dart';
 import 'package:chatwithalice/domain/entities/achievements.dart';
 import 'package:chatwithalice/domain/entities/ai_plan.dart';
 import 'package:chatwithalice/domain/entities/ai_provider.dart';
@@ -323,8 +324,154 @@ void main() {
       const change = AIPlanChange(type: AIPlanChangeType.createTask);
       expect(change.payload, isEmpty);
       expect(change.taskId, isNull);
+      expect(change.copyWith(taskId: 'task-2').taskId, 'task-2');
     });
   });
+
+  group('Task copyWith clearX', () {
+    test('clearDueAt/clearDescription 置 null 且不影响其它字段', () {
+      final due = DateTime(2024, 1, 5);
+      final task = Task(
+        id: 'task-1',
+        userId: 'user-1',
+        createdAt: _t0,
+        updatedAt: _t0,
+        version: 1,
+        deviceId: 'device-1',
+        title: '写方案',
+        description: '初稿',
+        dueAt: due,
+      );
+      final cleared = task.copyWith(clearDueAt: true, clearDescription: true);
+      expect(cleared.dueAt, isNull);
+      expect(cleared.description, isNull);
+      expect(cleared.title, '写方案');
+      expect(cleared.status, TaskStatus.inbox);
+
+      final updated = task.copyWith(dueAt: _t1, description: '修改版');
+      expect(updated.dueAt, _t1);
+      expect(updated.description, '修改版');
+
+      final partial = task.copyWith(clearDueAt: true, description: '保留');
+      expect(partial.dueAt, isNull);
+      expect(partial.description, '保留');
+    });
+  });
+
+  group('AIPlan 编解码与物化', () {
+    final plan = AIPlan(
+      id: 'plan-1',
+      userId: 'user-1',
+      createdAt: _t0,
+      updatedAt: _t0,
+      version: 1,
+      deviceId: 'device-1',
+      conversationId: 'conv-1',
+      sourceMessageId: 'msg-1',
+      status: AIPlanStatus.awaitingConfirmation,
+      aiModel: 'gpt-4o',
+      promptVersion: 'm1-plan-v1',
+      changes: const <AIPlanChange>[],
+    );
+
+    test('encodeChanges/decodeChanges 往返', () {
+      final change = AIPlanChange(
+        type: AIPlanChangeType.createTask,
+        payload: const <String, Object?>{
+          'title': '买东西',
+          'description': '牛奶',
+          'priority': 'high',
+          'dueAt': '2024-01-10T10:00:00.000',
+        },
+      );
+      final encoded = encodeChanges([change]);
+      final decoded = decodeChanges(encoded);
+      expect(decoded.length, 1);
+      expect(decoded.first.type, AIPlanChangeType.createTask);
+      expect(decoded.first.payload['title'], '买东西');
+    });
+
+    test('decodeChanges 非法输入抛 PlanValidationException', () {
+      expect(() => decodeChanges(null), throwsA(isA<PlanValidationException>()));
+      expect(() => decodeChanges(<String, dynamic>{}), throwsA(isA<PlanValidationException>()));
+      expect(() => decodeChanges(<Object?>[]), throwsA(isA<PlanValidationException>()));
+      expect(
+        () => decodeChanges(<Object?>[
+          <String, Object?>{'payload': <String, Object?>{}}
+        ]),
+        throwsA(isA<PlanValidationException>()),
+      );
+      expect(
+        () => decodeChanges(<Object?>[
+          <String, Object?>{'type': 'unknown'}
+        ]),
+        throwsA(isA<PlanValidationException>()),
+      );
+    });
+
+    test('taskFromPlanChange 物化（含 dueAt ISO→DateTime toLocal）', () {
+      final change = AIPlanChange(
+        type: AIPlanChangeType.createTask,
+        payload: const <String, Object?>{
+          'title': '写报告',
+          'description': '周报',
+          'priority': 'medium',
+          'dueAt': '2024-01-03T02:00:00.000Z',
+        },
+      );
+      final now = DateTime(2024, 1, 2, 12, 0, 0);
+      final task = taskFromPlanChange(
+        change,
+        plan,
+        userId: 'user-1',
+        deviceId: 'device-1',
+        now: now,
+      );
+      expect(task.title, '写报告');
+      expect(task.description, '周报');
+      expect(task.priority, TaskPriority.medium);
+      expect(task.sourceMessageId, 'msg-1');
+      expect(task.status, TaskStatus.inbox);
+      expect(task.version, 1);
+      expect(task.sortOrder, 0);
+      expect(task.dueAt, isNotNull);
+    });
+
+    test('taskFromPlanChange priority 缺失默认 medium', () {
+      final change = AIPlanChange(
+        type: AIPlanChangeType.createTask,
+        payload: const <String, Object?>{
+          'title': '任务A',
+        },
+      );
+      final task = taskFromPlanChange(
+        change,
+        plan,
+        userId: 'user-1',
+        deviceId: 'device-1',
+        now: _t0,
+      );
+      expect(task.priority, TaskPriority.medium);
+    });
+
+    test('taskFromPlanChange 非 createTask → ConflictException', () {
+      final change = AIPlanChange(
+        type: AIPlanChangeType.updateTask,
+        payload: const <String, Object?>{},
+      );
+      expect(
+        () => taskFromPlanChange(
+          change,
+          plan,
+          userId: 'user-1',
+          deviceId: 'device-1',
+          now: _t0,
+        ),
+        throwsA(isA<ConflictException>()),
+      );
+    });
+  });
+
 
   group('TaskChange sealed', () {
     test('三种变更事件可构造', () {

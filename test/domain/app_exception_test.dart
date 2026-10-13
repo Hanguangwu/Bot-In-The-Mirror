@@ -20,6 +20,8 @@ void main() {
       expect(const StorageException('x').code, 'storage');
       expect(const NotFoundException('x').code, 'not_found');
       expect(const UnsupportedException('x').code, 'unsupported');
+      expect(const PlanValidationException('x').code, 'planInvalid');
+      expect(const ConflictException('x').code, 'conflict');
     });
 
     test('message 为可直接展示的中文文案', () {
@@ -42,10 +44,29 @@ void main() {
       expect(text, contains('cause'));
     });
 
+    test('新异常 toString 安全（含可选 cause 场景）', () {
+      const secret = 'sk-test-secret-key';
+      final planText = PlanValidationException(
+        'AI 返回的任务计划格式无效',
+        cause: StateError('bad json'),
+      ).toString();
+      expect(planText, contains('planInvalid'));
+      expect(planText, contains('AI 返回的任务计划格式无效'));
+      expect(planText, contains('cause'));
+
+      final conflictText = ConflictException(
+        '状态冲突',
+        cause: 'invalidState',
+      ).toString();
+      expect(conflictText, contains('conflict'));
+      expect(conflictText, contains('状态冲突'));
+      expect(conflictText, isNot(contains(secret)));
+    });
+
     test('AIProviderException.toString 绝不泄露密钥或完整响应体', () {
       const secret = 'sk-test-secret-key-1234567890';
       const body = '{"error":{"message":"invalid api key $secret"}}';
-      const exception = AIProviderException(
+      final exception = AIProviderException(
         'AI 服务返回错误',
         statusCode: 401,
         body: body,

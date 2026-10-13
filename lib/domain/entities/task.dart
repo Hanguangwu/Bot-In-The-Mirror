@@ -105,6 +105,8 @@ class Task extends SyncableEntity {
     String? repeatRule,
     String? sourceMessageId,
     int? sortOrder,
+    bool clearDueAt = false,
+    bool clearDescription = false,
   }) {
     return Task(
       id: id ?? this.id,
@@ -116,10 +118,10 @@ class Task extends SyncableEntity {
       deviceId: deviceId ?? this.deviceId,
       projectId: projectId ?? this.projectId,
       title: title ?? this.title,
-      description: description ?? this.description,
+      description: clearDescription ? null : description ?? this.description,
       status: status ?? this.status,
       priority: priority ?? this.priority,
-      dueAt: dueAt ?? this.dueAt,
+      dueAt: clearDueAt ? null : dueAt ?? this.dueAt,
       parentTaskId: parentTaskId ?? this.parentTaskId,
       repeatRule: repeatRule ?? this.repeatRule,
       sourceMessageId: sourceMessageId ?? this.sourceMessageId,

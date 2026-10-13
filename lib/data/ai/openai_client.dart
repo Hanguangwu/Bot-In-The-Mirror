@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../../core/errors/app_exception.dart';
+import '../../core/ids/ids.dart';
 import '../../domain/ai/ai_client.dart';
 import '../../domain/entities/ai_plan.dart';
 import '../../domain/entities/ai_provider.dart';
@@ -19,18 +20,98 @@ class OpenAIClient implements AIClient {
   })  : _apiKeyProvider = apiKeyProvider,
         _httpClient = httpClient ?? http.Client();
 
+  /// 任务拆解系统提示版本；落库用于回溯（§6.1）。
+  static const String planPromptVersion = 'm1-plan-v1';
+
+  /// 任务拆解系统提示（§6.1 原文，中文，要求只输出 JSON）。
+  static const String planSystemPrompt = '你是「Alice」的个人执行助手。请把用户最近的需求拆解为任务清单，只返回 JSON：\n'
+      '{"intent":"一句话概括意图","tasks":[{"title":"任务标题","description":"可选说明","priority":"low|medium|high|urgent","dueAt":"可选，ISO8601 日期或 null"}]}\n'
+      '规则：1) 只输出 JSON，不要任何额外文字；2) 无法拆解时返回空 tasks，并用 intent 说明原因；\n'
+      '3) 不要编造用户未提出的截止时间。';
+
+  /// 合法优先级枚举（小写）。
+  static const Set<String> _planPriorities = <String>{
+    'low',
+    'medium',
+    'high',
+    'urgent',
+  };
+
   final String Function() _apiKeyProvider;
   final http.Client _httpClient;
 
   @override
   Future<AIResult> complete(AIRequest request) async {
     final profile = request.profile;
+    final body = await _postChatCompletion(
+      profile: profile,
+      messages: request.messages,
+      temperature: profile.temperature,
+    );
+    return _parseResult(body, profile.model);
+  }
+
+  @override
+  Future<AIResult> testConnection(AIProviderProfile profile) {
+    return complete(
+      AIRequest(
+        messages: const <AIChatMessage>[
+          AIChatMessage(role: AIChatRole.user, content: 'ping'),
+        ],
+        profile: profile,
+      ),
+    );
+  }
+
+  @override
+  Future<AIPlan> proposePlan(PlanRequest request) async {
+    final profile = request.profile;
+    final body = await _postChatCompletion(
+      profile: profile,
+      messages: <AIChatMessage>[
+        const AIChatMessage(
+          role: AIChatRole.system,
+          content: planSystemPrompt,
+        ),
+        AIChatMessage(role: AIChatRole.user, content: request.request),
+      ],
+      // 拆解固定低温度，降低输出发散（§6.1）。
+      temperature: 0.2,
+    );
+
+    final parsed = _parsePlan(body, profile.model);
+    final now = DateTime.now();
+    return AIPlan(
+      id: generateId(),
+      userId: newUserId(),
+      createdAt: now,
+      updatedAt: now,
+      version: 1,
+      deviceId: newDeviceId(),
+      conversationId: request.conversationId,
+      sourceMessageId: request.sourceMessageId,
+      status: AIPlanStatus.awaitingConfirmation,
+      aiModel: parsed.model,
+      promptVersion: planPromptVersion,
+      changes: parsed.changes,
+    );
+  }
+
+  /// 发送一次 `/chat/completions` 请求，返回原始响应体。
+  ///
+  /// 网络异常抛 [NetworkException]；非 2xx 抛 [AIProviderException]。
+  /// 绝不打印密钥或响应体。
+  Future<String> _postChatCompletion({
+    required AIProviderProfile profile,
+    required List<AIChatMessage> messages,
+    required double temperature,
+  }) async {
     final uri = Uri.parse(
       '${_normalizeBaseUrl(profile.baseUrl)}/chat/completions',
     );
     final payload = jsonEncode(<String, Object?>{
       'model': profile.model,
-      'messages': request.messages
+      'messages': messages
           .map(
             (message) => <String, String>{
               'role': _roleName(message.role),
@@ -38,9 +119,9 @@ class OpenAIClient implements AIClient {
             },
           )
           .toList(),
-      'temperature': profile.temperature,
+      'temperature': temperature,
       'max_tokens': profile.maxTokens,
-      // M0 不处理流式响应，显式关闭。
+      // 不处理流式响应，显式关闭。
       'stream': false,
     });
 
@@ -66,24 +147,113 @@ class OpenAIClient implements AIClient {
       );
     }
 
-    return _parseResult(response.body, profile.model);
+    return response.body;
   }
 
-  @override
-  Future<AIResult> testConnection(AIProviderProfile profile) {
-    return complete(
-      AIRequest(
-        messages: const <AIChatMessage>[
-          AIChatMessage(role: AIChatRole.user, content: 'ping'),
-        ],
-        profile: profile,
-      ),
-    );
-  }
+  /// 从响应信封中取出模型名与 message 内容，再解析为计划变更。
+  ///
+  /// 信封或内容 JSON 非法、schema 不符合 §6.2 时一律抛
+  /// [PlanValidationException]；空 `tasks` 返回空变更列表（由用例层做 null 语义）。
+  ({String model, List<AIPlanChange> changes}) _parsePlan(
+    String raw,
+    String fallbackModel,
+  ) {
+    final Object? envelope;
+    try {
+      envelope = jsonDecode(raw);
+    } catch (error) {
+      throw PlanValidationException('AI 返回的任务计划格式无效', cause: error);
+    }
+    var model = fallbackModel;
+    var content = '';
+    if (envelope is Map<String, dynamic>) {
+      model = (envelope['model'] as String?) ?? fallbackModel;
+      final choices = envelope['choices'];
+      if (choices is List && choices.isNotEmpty) {
+        final first = choices.first;
+        if (first is Map<String, dynamic>) {
+          final message = first['message'];
+          if (message is Map<String, dynamic>) {
+            content = (message['content'] as String? ?? '').trim();
+          }
+        }
+      }
+    }
 
-  @override
-  Future<AIPlan> proposePlan(PlanRequest request) async {
-    throw const UnsupportedException('任务拆解将在下一阶段（M1）提供');
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(content);
+    } catch (error) {
+      throw PlanValidationException('AI 返回的任务计划格式无效', cause: error);
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+
+    // 规则 2：intent 必须为非空字符串（不落库，仅用于校验）。
+    final intent = decoded['intent'];
+    if (intent is! String) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+
+    // 规则 3：tasks 必须为数组。
+    final rawTasks = decoded['tasks'];
+    if (rawTasks is! List) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+
+    final changes = <AIPlanChange>[];
+    for (final item in rawTasks) {
+      if (item is! Map<String, dynamic>) {
+        throw const PlanValidationException('AI 返回的任务计划格式无效');
+      }
+      final title = item['title'];
+      if (title is! String || title.isEmpty) {
+        throw const PlanValidationException('AI 返回的任务计划格式无效');
+      }
+
+      // 规则 4：priority 缺失默认 medium；非缺失先归一化再校验。
+      final priorityRaw = item['priority'];
+      final String priority;
+      if (priorityRaw == null) {
+        priority = 'medium';
+      } else if (priorityRaw is String &&
+          _planPriorities.contains(priorityRaw.toLowerCase())) {
+        priority = priorityRaw.toLowerCase();
+      } else {
+        throw const PlanValidationException('AI 返回的任务计划格式无效');
+      }
+
+      // 规则 5：dueAt 缺失/null 合法；非空须为可解析 ISO8601，解析后 toLocal。
+      final dueAtRaw = item['dueAt'];
+      final String? dueAt;
+      if (dueAtRaw == null) {
+        dueAt = null;
+      } else if (dueAtRaw is String) {
+        final parsedDueAt = DateTime.tryParse(dueAtRaw);
+        if (parsedDueAt == null) {
+          throw const PlanValidationException('AI 返回的任务计划格式无效');
+        }
+        dueAt = parsedDueAt.toLocal().toIso8601String();
+      } else {
+        throw const PlanValidationException('AI 返回的任务计划格式无效');
+      }
+
+      final payload = <String, Object?>{
+        'title': title,
+        'priority': priority,
+        'dueAt': dueAt,
+      };
+      final description = item['description'];
+      if (description is String) {
+        payload['description'] = description;
+      }
+      changes.add(
+        AIPlanChange(type: AIPlanChangeType.createTask, payload: payload),
+      );
+    }
+
+    return (model: model, changes: changes);
   }
 
   /// 解析 OpenAI 兼容响应；结构异常时抛 [AIProviderException]。

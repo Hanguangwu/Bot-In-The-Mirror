@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -5,8 +7,10 @@ import '../../core/errors/app_exception.dart';
 import '../../di.dart';
 import '../../domain/ai/ai_client.dart';
 import '../../domain/entities/conversation.dart';
+import '../../domain/repositories/ai_plan_repository.dart';
 import '../../domain/repositories/conversation_repository.dart';
 import '../../domain/repositories/settings_store.dart';
+import '../tasks/application/propose_task_plan.dart';
 import 'application/send_message.dart';
 
 /// 对话页：仓库流驱动的消息列表，发送走 [SendMessage] 用例。
@@ -33,10 +37,31 @@ class _ChatScreenState extends State<ChatScreen> {
   );
   late final Stream<List<Message>> _messagesStream =
       _repository.watchMessages(widget.conversation.id);
+  StreamSubscription<List<Message>>? _messagesSubscription;
+  List<Message> _messages = const <Message>[];
   bool _isLoading = false;
+  bool _isProposing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 单订阅：消息列表与「拆解为任务」按钮可用态共用同一份快照。
+    _messagesSubscription = _messagesStream.listen(
+      (messages) {
+        if (mounted) {
+          setState(() => _messages = messages);
+        }
+      },
+      // 本地流异常不抛到异步层：保留现列表，仅打印（评审 A2）。
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('watchMessages 流错误: $error');
+      },
+    );
+  }
 
   @override
   void dispose() {
+    _messagesSubscription?.cancel();
     _messageController.dispose();
     super.dispose();
   }
@@ -102,6 +127,8 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final model = _settingsStore.currentProfile.model;
+    final messages = _messages;
+    final hasUserMessage = messages.any((m) => m.role == MessageRole.user);
     return Scaffold(
       backgroundColor: Colors.grey.shade100,
       appBar: AppBar(
@@ -123,6 +150,22 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: <Widget>[
+          IconButton(
+            icon: _isProposing
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.checklist, color: Colors.white),
+            tooltip: '拆解为任务',
+            onPressed: hasUserMessage && !_isProposing
+                ? () => _proposeTask(messages)
+                : null,
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, color: Colors.white),
             onSelected: (value) {
@@ -148,26 +191,19 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: <Widget>[
           Expanded(
-            child: StreamBuilder<List<Message>>(
-              stream: _messagesStream,
-              builder: (context, snapshot) {
-                final messages = snapshot.data ?? const <Message>[];
-                if (messages.isEmpty) {
-                  return const Center(
+            child: messages.isEmpty
+                ? const Center(
                     child: Text(
                       '发送第一条消息开始对话',
                       style: TextStyle(color: Colors.grey),
                     ),
-                  );
-                }
-                return ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) =>
-                      _buildMessageBubble(messages[index]),
-                );
-              },
-            ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: messages.length,
+                    itemBuilder: (context, index) =>
+                        _buildMessageBubble(messages[index]),
+                  ),
           ),
           if (_isLoading)
             Padding(
@@ -231,6 +267,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 FloatingActionButton(
                   mini: true,
                   backgroundColor: Colors.blue,
+                  // 与首页 FAB 的默认 Hero tag 冲突，禁用转场动画（heroTag: null）。
+                  heroTag: null,
                   onPressed: _isLoading ? null : _handleSend,
                   child: const Icon(Icons.send, color: Colors.white, size: 20),
                 ),
@@ -240,6 +278,61 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  /// 把最近一条用户消息拆解为任务计划（显式触发）。
+  Future<void> _proposeTask(List<Message> messages) async {
+    final userMessages =
+        messages.where((m) => m.role == MessageRole.user).toList();
+    if (userMessages.isEmpty || _isProposing) {
+      return;
+    }
+    final source = userMessages.last;
+    setState(() => _isProposing = true);
+    try {
+      final plan = await ProposeTaskPlan(
+        aiClient: getIt<AIClient>(),
+        aiPlanRepository: getIt<AIPlanRepository>(),
+      ).propose(
+        PlanRequest(
+          conversationId: widget.conversation.id,
+          sourceMessageId: source.id,
+          request: source.content,
+          profile: _settingsStore.currentProfile,
+        ),
+      );
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            plan == null ? '未能识别出可拆解的任务' : '已生成任务计划，请到任务页确认',
+          ),
+        ),
+      );
+    } on PlanValidationException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法识别的任务计划')),
+        );
+      }
+    } on AppException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('拆解失败，请稍后重试')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isProposing = false);
+      }
+    }
   }
 
   /// 构建消息气泡（Telegram 风格）。

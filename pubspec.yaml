@@ -47,6 +47,7 @@ dependencies:
   shared_preferences: ^2.2.2
   # 客户端 UUID 生成（实体 ID，M0 起）
   uuid: ^4.6.0
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:

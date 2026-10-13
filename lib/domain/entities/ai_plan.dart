@@ -1,4 +1,8 @@
+import 'package:uuid/uuid.dart';
+
+import '../../core/errors/app_exception.dart';
 import 'syncable_entity.dart';
+import 'task.dart';
 
 /// AI 计划状态机：draft → awaitingConfirmation → applied/rejected/expired。
 enum AIPlanStatus {
@@ -165,3 +169,149 @@ class AIPlan extends SyncableEntity {
     );
   }
 }
+
+/// 将计划变更列表编码为 JSON 可序列化的结构。
+/// 每条条目：{'type': 枚举.name, 'taskId'?, 'calendarEntryId'?, 'payload': {...}}。
+/// payload 键值必须是 JSON 原生类型（String/int/double/bool/null/嵌套 List/Map）。
+/// dueAt 由调用方以 ISO 字符串放入 payload —— 本函数只做结构编码，不做类型转换。
+Map<String, Object?> _changeToJson(AIPlanChange change) {
+  final map = <String, Object?>{
+    'type': change.type.name,
+    'payload': change.payload,
+  };
+  if (change.taskId != null) {
+    map['taskId'] = change.taskId;
+  }
+  if (change.calendarEntryId != null) {
+    map['calendarEntryId'] = change.calendarEntryId;
+  }
+  return map;
+}
+
+/// 编码 AI 计划变更列表。
+Map<String, Object?> encodeChanges(List<AIPlanChange> changes) {
+  return <String, Object?>{
+    'changes': changes.map(_changeToJson).toList(),
+  };
+}
+
+/// 将 JSON 解码为计划变更列表。
+/// 数据完整性优先：null/非 List、缺 type、type 非已知四枚举均抛 [PlanValidationException]。
+/// 与 Conversation metadata 的宽容默认不同，此处要求结构完整。
+List<AIPlanChange> decodeChanges(Object? json) {
+  if (json == null) {
+    throw const PlanValidationException('AI 返回的任务计划格式无效');
+  }
+  if (json is! Map<String, Object?>) {
+    throw const PlanValidationException('AI 返回的任务计划格式无效');
+  }
+  final rawChanges = json['changes'];
+  if (rawChanges is! List<Object?>) {
+    throw const PlanValidationException('AI 返回的任务计划格式无效');
+  }
+  final result = <AIPlanChange>[];
+  for (final item in rawChanges) {
+    if (item is! Map<String, Object?>) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+    final typeName = item['type'];
+    if (typeName is! String || typeName.isEmpty) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+    AIPlanChangeType? type;
+    for (final t in AIPlanChangeType.values) {
+      if (t.name == typeName) {
+        type = t;
+        break;
+      }
+    }
+    if (type == null) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+    final payload = item['payload'];
+    final payloadMap = payload is Map<String, Object?>
+        ? payload
+        : <String, Object?>{};
+    final taskId = item['taskId'];
+    final calendarEntryId = item['calendarEntryId'];
+    result.add(
+      AIPlanChange(
+        type: type,
+        taskId: taskId is String ? taskId : null,
+        calendarEntryId: calendarEntryId is String ? calendarEntryId : null,
+        payload: payloadMap,
+      ),
+    );
+  }
+  return result;
+}
+
+/// 将 createTask 变更物化为 [Task]。
+/// change.type != createTask 时抛 [ConflictException]。
+Task taskFromPlanChange(
+  AIPlanChange change,
+  AIPlan plan, {
+  required String userId,
+  required String deviceId,
+  required DateTime now,
+}) {
+  if (change.type != AIPlanChangeType.createTask) {
+    throw const ConflictException('计划变更类型不匹配，无法物化为任务');
+  }
+  final payload = change.payload;
+  final title = payload['title'];
+  if (title is! String || title.isEmpty) {
+    throw const PlanValidationException('AI 返回的任务计划格式无效');
+  }
+  final description = payload['description'];
+  final descriptionVal = description is String ? description : null;
+  final priorityStr = payload['priority'];
+  TaskPriority priority = TaskPriority.medium;
+  if (priorityStr is String) {
+    final lower = priorityStr.toLowerCase();
+    switch (lower) {
+      case 'low':
+        priority = TaskPriority.low;
+        break;
+      case 'medium':
+        priority = TaskPriority.medium;
+        break;
+      case 'high':
+        priority = TaskPriority.high;
+        break;
+      case 'urgent':
+        priority = TaskPriority.urgent;
+        break;
+      default:
+        throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+  }
+  DateTime? dueAt;
+  final dueAtStr = payload['dueAt'];
+  if (dueAtStr is String) {
+    try {
+      dueAt = DateTime.parse(dueAtStr).toLocal();
+    } catch (_) {
+      throw const PlanValidationException('AI 返回的任务计划格式无效');
+    }
+  }
+  const uuid = Uuid();
+  return Task(
+    id: uuid.v4(),
+    userId: userId,
+    createdAt: now,
+    updatedAt: now,
+    version: 1,
+    deviceId: deviceId,
+    title: title,
+    description: descriptionVal,
+    status: TaskStatus.inbox,
+    priority: priority,
+    dueAt: dueAt,
+    parentTaskId: null,
+    repeatRule: null,
+    sourceMessageId: plan.sourceMessageId,
+    sortOrder: 0,
+  );
+}
+

@@ -30,7 +30,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     final profile = _settingsStore.currentProfile;
-    _apiKeyController.text = profile.apiKeyRef ?? '';
+    _apiKeyController.text = _settingsStore.apiKey;
     _baseUrlController.text = profile.baseUrl;
     _temperatureController.text = profile.temperature.toString();
     _maxTokensController.text = profile.maxTokens.toString();
@@ -50,7 +50,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.dispose();
   }
 
-  /// 由当前输入构造配置（明文 key 存于内存 apiKeyRef）。
+  /// 由当前输入构造配置（非敏感字段）。
   AIProviderProfile _buildProfile() {
     final temperature =
         double.tryParse(_temperatureController.text) ?? AppConfig.defaultTemperature;
@@ -62,22 +62,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
       model: _selectedModel,
       temperature: temperature,
       maxTokens: maxTokens,
-      apiKeyRef: _apiKeyController.text,
     );
   }
 
-  /// 保存设置到内存存储。
+  /// 保存设置到存储。
   Future<void> _saveSettings() async {
-    await _settingsStore.saveProfile(_buildProfile());
+    final profile = _buildProfile();
+    bool profileSaved = true;
+    bool keySaved = true;
+    String key = _apiKeyController.text;
+    try {
+      await _settingsStore.saveProfile(profile);
+    } catch (_) {
+      profileSaved = false;
+    }
+    try {
+      await _settingsStore.saveApiKey(key);
+    } catch (_) {
+      keySaved = false;
+    }
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('设置已保存')),
-    );
+    if (!profileSaved) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('设置保存失败，请重试')),
+      );
+    } else if (keySaved) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('设置已保存，API Key 已保存至安全存储')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('设置已保存（API Key 未保存：安全存储不可用）')),
+      );
+    }
   }
 
-  /// 测试连接：成功/失败均以 SnackBar 反馈，失败只显示异常文案。
+  /// 测试连接：成功/失败均以 SnackBar 反馈。
   Future<void> _testConnection() async {
     setState(() => _isTesting = true);
     try {
@@ -217,74 +239,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  /// 构建模型选择器。
   Widget _buildModelSelector() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        const Text(
-          '选择默认模型：',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: DropdownButton<String>(
-            value: _selectedModel,
-            isExpanded: true,
-            underline: const SizedBox(),
-            onChanged: (value) {
-              if (value != null) {
-                setState(() => _selectedModel = value);
-              }
-            },
-            items: _models
-                .map(
-                  (model) => DropdownMenuItem<String>(
-                    value: model,
-                    child: Text(model),
-                  ),
-                )
-                .toList(),
-          ),
-        ),
-      ],
+    return DropdownButtonFormField<String>(
+      decoration: const InputDecoration(
+        labelText: '模型',
+        border: OutlineInputBorder(),
+      ),
+      initialValue: _selectedModel,
+      items: _models.map((model) {
+        return DropdownMenuItem<String>(
+          value: model,
+          child: Text(model),
+        );
+      }).toList(),
+      onChanged: (value) {
+        if (value != null) {
+          setState(() => _selectedModel = value);
+        }
+      },
     );
   }
 
-  /// 构建文本输入框。
   Widget _buildTextField({
     required String label,
     required TextEditingController controller,
+    String? hint,
     bool isPassword = false,
     TextInputType keyboardType = TextInputType.text,
-    String? hint,
   }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        TextField(
-          controller: controller,
-          obscureText: isPassword,
-          keyboardType: keyboardType,
-          decoration: InputDecoration(
-            hintText: hint,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 12,
-            ),
-            filled: true,
-            fillColor: Colors.white,
-          ),
-        ),
-      ],
+    return TextField(
+      controller: controller,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        border: const OutlineInputBorder(),
+      ),
+      obscureText: isPassword,
+      keyboardType: keyboardType,
     );
   }
 }
