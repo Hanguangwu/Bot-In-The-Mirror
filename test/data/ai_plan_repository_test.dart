@@ -2,12 +2,20 @@ import 'package:chatwithalice/core/errors/app_exception.dart';
 import 'package:chatwithalice/core/time/clock.dart';
 import 'package:chatwithalice/data/local/ai_plan_repository_impl.dart';
 import 'package:chatwithalice/data/local/app_database.dart';
+import 'package:chatwithalice/data/local/calendar_entry_repository_impl.dart';
+import 'package:chatwithalice/data/local/sync_operation_repository_impl.dart';
 import 'package:chatwithalice/data/local/task_repository_impl.dart';
 import 'package:chatwithalice/data/memory/memory_ai_plan_repository.dart';
+import 'package:chatwithalice/data/memory/memory_calendar_entry_repository.dart';
+import 'package:chatwithalice/data/memory/memory_store.dart';
+import 'package:chatwithalice/data/memory/memory_sync_operation_repository.dart';
 import 'package:chatwithalice/data/memory/memory_task_repository.dart';
 import 'package:chatwithalice/domain/entities/ai_plan.dart';
+import 'package:chatwithalice/domain/entities/sync.dart';
 import 'package:chatwithalice/domain/entities/task.dart';
 import 'package:chatwithalice/domain/repositories/ai_plan_repository.dart';
+import 'package:chatwithalice/domain/repositories/calendar_entry_repository.dart';
+import 'package:chatwithalice/domain/repositories/sync_operation_repository.dart';
 import 'package:chatwithalice/domain/repositories/task_repository.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,17 +30,21 @@ class _MutableClock implements Clock {
   DateTime now() => current;
 }
 
-/// 被测实现、共享任务仓储、计划读取器与资源释放器的组合。
+/// 被测实现、共享任务/日历仓储、队列、计划读取器与资源释放器的组合。
 class _Harness {
   _Harness({
     required this.repository,
     required this.taskRepository,
+    required this.calendarRepository,
+    required this.syncOperationRepository,
     required this.readPlan,
     required Future<void> Function() dispose,
   }) : _dispose = dispose;
 
   final AIPlanRepository repository;
   final TaskRepository taskRepository;
+  final CalendarEntryRepository calendarRepository;
+  final SyncOperationRepository syncOperationRepository;
   final Future<AIPlan?> Function(String id) readPlan;
   final Future<void> Function() _dispose;
 
@@ -75,6 +87,24 @@ AIPlanChange _createTaskChange(
       if (description != null) 'description': description,
       'priority': priority,
       if (dueAt != null) 'dueAt': dueAt,
+    },
+  );
+}
+
+/// 构造 scheduleTask 变更（时间用本地朴素 ISO，避免测试受宿主时区影响）。
+AIPlanChange _scheduleChange(
+  String title, {
+  required String startAt,
+  required String endAt,
+  String? note,
+}) {
+  return AIPlanChange(
+    type: AIPlanChangeType.scheduleTask,
+    payload: <String, Object?>{
+      'title': title,
+      'startAt': startAt,
+      'endAt': endAt,
+      if (note != null) 'note': note,
     },
   );
 }
@@ -305,6 +335,121 @@ void _runContract(
       expect(change.payload['priority'], 'urgent');
       expect(change.payload['dueAt'], '2026-03-05T10:30:00+08:00');
     });
+
+    test('save 入队 ai_plan create；reject 入队 ai_plan update', () async {
+      final plan = await repository.save(_plan(id: 'p1'));
+
+      var ops = await harness.syncOperationRepository.getPending();
+      expect(ops.length, 1);
+      expect(ops.single.entityType, 'ai_plan');
+      expect(ops.single.entityId, plan.id);
+      expect(ops.single.kind, SyncOperationKind.create);
+      expect(ops.single.payload['id'], plan.id);
+      expect(
+        ops.single.payload['status'],
+        AIPlanStatus.awaitingConfirmation.name,
+      );
+
+      await repository.reject(plan.id);
+
+      ops = await harness.syncOperationRepository.getPending();
+      expect(ops.length, 2);
+      final update =
+          ops.where((op) => op.kind == SyncOperationKind.update).single;
+      expect(update.entityType, 'ai_plan');
+      expect(update.entityId, plan.id);
+      expect(update.payload['status'], AIPlanStatus.rejected.name);
+    });
+
+    test('confirm 物化 scheduleTask：写日历条目并入队三类操作', () async {
+      final plan = await repository.save(
+        _plan(
+          id: '',
+          changes: <AIPlanChange>[
+            _createTaskChange('写周报'),
+            _scheduleChange(
+              '评审会',
+              startAt: '2026-05-01T09:00:00',
+              endAt: '2026-05-01T10:00:00',
+              note: '会议室A',
+            ),
+          ],
+        ),
+      );
+      clock.current = clock.current.add(const Duration(minutes: 1));
+
+      await repository.confirm(plan.id);
+
+      final entries = await harness.calendarRepository.getInRange(
+        DateTime(2026, 5, 1),
+        DateTime(2026, 5, 2),
+      );
+      expect(entries.length, 1);
+      final entry = entries.single;
+      expect(entry.title, '评审会');
+      expect(entry.allDay, isFalse);
+      expect(entry.taskIds, isEmpty);
+      expect(entry.note, '会议室A');
+      expect(entry.userId, 'user-1');
+      expect(entry.deviceId, 'device-1');
+      expect(entry.startAt, DateTime(2026, 5, 1, 9));
+      expect(entry.endAt, DateTime(2026, 5, 1, 10));
+
+      // 逐类计数断言「恰好一条」：若 confirm 与日历仓储重复入队，calendar_entry:create 会变 2。
+      // 含 save(plan) 产生的 ai_plan:create。
+      final ops = await harness.syncOperationRepository.getPending();
+      final counts = <String, int>{};
+      for (final op in ops) {
+        final key = '${op.entityType}:${op.kind.name}';
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+      expect(counts, <String, int>{
+        'ai_plan:create': 1,
+        'task:create': 1,
+        'calendar_entry:create': 1,
+        'ai_plan:update': 1,
+      });
+      expect(await repository.getPending(), isEmpty);
+    });
+
+    test('confirm 中途失败无孤儿：任务/日历/队列均无残留，计划保持待确认', () async {
+      final plan = await repository.save(
+        _plan(
+          id: '',
+          changes: <AIPlanChange>[
+            _createTaskChange('应回滚'),
+            _scheduleChange(
+              '应回滚日程',
+              startAt: '2026-05-01T09:00:00',
+              endAt: '2026-05-01T10:00:00',
+            ),
+            const AIPlanChange(type: AIPlanChangeType.updateTask, taskId: 'x'),
+          ],
+        ),
+      );
+      final queueBefore = await harness.syncOperationRepository.getPending();
+
+      await expectLater(
+        repository.confirm(plan.id),
+        throwsA(isA<ConflictException>()),
+      );
+
+      expect(await harness.taskRepository.getTasks(const TaskQuery()), isEmpty);
+      expect(
+        await harness.calendarRepository.getInRange(
+          DateTime(2026, 4, 30),
+          DateTime(2026, 5, 3),
+        ),
+        isEmpty,
+      );
+      final stored = await harness.readPlan(plan.id);
+      expect(stored!.status, AIPlanStatus.awaitingConfirmation);
+      expect(stored.appliedAt, isNull);
+      expect(
+        (await harness.syncOperationRepository.getPending()).length,
+        queueBefore.length,
+      );
+    });
   });
 }
 
@@ -312,13 +457,32 @@ void main() {
   _runContract(
     'MemoryAIPlanRepository',
     create: (clock) async {
-      final tasks = MemoryTaskRepository(
+      final store = MemoryStore();
+      final syncOps = MemorySyncOperationRepository(
         clock: clock,
         userId: 'user-1',
         deviceId: 'device-1',
+        store: store,
+      );
+      final tasks = MemoryTaskRepository(
+        syncOperationRepository: syncOps,
+        clock: clock,
+        userId: 'user-1',
+        deviceId: 'device-1',
+        store: store,
+      );
+      final calendar = MemoryCalendarEntryRepository(
+        syncOperationRepository: syncOps,
+        clock: clock,
+        userId: 'user-1',
+        deviceId: 'device-1',
+        store: store,
       );
       final repository = MemoryAIPlanRepository(
         tasks,
+        syncOperationRepository: syncOps,
+        calendarEntryRepository: calendar,
+        memoryStore: store,
         clock: clock,
         userId: 'user-1',
         deviceId: 'device-1',
@@ -326,10 +490,14 @@ void main() {
       return _Harness(
         repository: repository,
         taskRepository: tasks,
+        calendarRepository: calendar,
+        syncOperationRepository: syncOps,
         readPlan: repository.planById,
         dispose: () async {
           repository.dispose();
           tasks.dispose();
+          calendar.dispose();
+          syncOps.dispose();
         },
       );
     },
@@ -339,9 +507,23 @@ void main() {
     'AIPlanRepositoryImpl（Drift 内存库）',
     create: (clock) async {
       final database = AppDatabase(NativeDatabase.memory());
+      final syncOps = SyncOperationRepositoryImpl(
+        database,
+        clock,
+        userId: 'user-1',
+        deviceId: 'device-1',
+      );
       final tasks = TaskRepositoryImpl(
         database,
         clock,
+        syncOperationRepository: syncOps,
+        userId: 'user-1',
+        deviceId: 'device-1',
+      );
+      final calendar = CalendarEntryRepositoryImpl(
+        database,
+        clock,
+        syncOperationRepository: syncOps,
         userId: 'user-1',
         deviceId: 'device-1',
       );
@@ -349,12 +531,16 @@ void main() {
         database,
         tasks,
         clock,
+        syncOperationRepository: syncOps,
+        calendarEntryRepository: calendar,
         userId: 'user-1',
         deviceId: 'device-1',
       );
       return _Harness(
         repository: repository,
         taskRepository: tasks,
+        calendarRepository: calendar,
+        syncOperationRepository: syncOps,
         readPlan: repository.planById,
         dispose: () => database.close(),
       );

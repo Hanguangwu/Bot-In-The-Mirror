@@ -5,7 +5,10 @@ import '../../core/errors/app_exception.dart';
 import '../../core/ids/ids.dart';
 import '../../core/time/clock.dart';
 import '../../domain/entities/conversation.dart';
+import '../../domain/entities/sync.dart';
 import '../../domain/repositories/conversation_repository.dart';
+import '../../domain/repositories/sync_operation_repository.dart';
+import '../sync/sync_operation_factory.dart';
 import 'app_database.dart';
 
 /// 基于 Drift 的会话仓储实现。
@@ -17,15 +20,18 @@ class ConversationRepositoryImpl implements ConversationRepository {
   ConversationRepositoryImpl(
     this._db,
     this._clock, {
+    required SyncOperationRepository syncOperationRepository,
     String? userId,
     String? deviceId,
   })  : _userId = userId ?? newUserId(),
-        _deviceId = deviceId ?? newDeviceId();
+        _deviceId = deviceId ?? newDeviceId(),
+        _syncOperationRepository = syncOperationRepository;
 
   final AppDatabase _db;
   final Clock _clock;
   final String _userId;
   final String _deviceId;
+  final SyncOperationRepository _syncOperationRepository;
 
   @override
   Stream<List<Conversation>> watchConversations() {
@@ -106,30 +112,56 @@ class ConversationRepositoryImpl implements ConversationRepository {
       deviceId: _deviceId,
       title: title,
     );
-    await _db.into(_db.conversations).insert(_toConversationCompanion(conversation));
+    await _db.transaction(() async {
+      await _db
+          .into(_db.conversations)
+          .insert(_toConversationCompanion(conversation));
+      await _syncOperationRepository.enqueue(
+        buildSyncOperation(
+          entity: conversation,
+          entityType: 'conversation',
+          kind: SyncOperationKind.create,
+          userId: _userId,
+          deviceId: _deviceId,
+          now: now,
+        ),
+      );
+    });
     return conversation;
   }
 
   @override
   Future<Conversation> updateConversation(Conversation conversation) async {
-    final existing = await (_db.select(_db.conversations)
-          ..where((t) => t.id.equals(conversation.id)))
-        .getSingleOrNull();
-    if (existing == null) {
-      throw const NotFoundException('会话不存在或已被删除');
-    }
-    final now = _clock.now();
-    final updated = conversation.copyWith(
-      userId: _userId,
-      deviceId: _deviceId,
-      createdAt: existing.createdAt,
-      updatedAt: now,
-      version: existing.version + 1,
-    );
-    await _db
-        .into(_db.conversations)
-        .insertOnConflictUpdate(_toConversationCompanion(updated));
-    return updated;
+    return _db.transaction(() async {
+      final existing = await (_db.select(_db.conversations)
+            ..where((t) => t.id.equals(conversation.id)))
+          .getSingleOrNull();
+      if (existing == null) {
+        throw const NotFoundException('会话不存在或已被删除');
+      }
+      final now = _clock.now();
+      final updated = conversation.copyWith(
+        userId: _userId,
+        deviceId: _deviceId,
+        createdAt: existing.createdAt,
+        updatedAt: now,
+        version: existing.version + 1,
+      );
+      await _db
+          .into(_db.conversations)
+          .insertOnConflictUpdate(_toConversationCompanion(updated));
+      await _syncOperationRepository.enqueue(
+        buildSyncOperation(
+          entity: updated,
+          entityType: 'conversation',
+          kind: SyncOperationKind.update,
+          userId: _userId,
+          deviceId: _deviceId,
+          now: now,
+        ),
+      );
+      return updated;
+    });
   }
 
   @override
@@ -149,44 +181,81 @@ class ConversationRepositoryImpl implements ConversationRepository {
             ..where((t) => t.id.equals(stored.conversationId)))
           .getSingleOrNull();
       if (conversation != null) {
+        // §7.4：摘要派生字段更新不改 conversation.updatedAt、不 bump version、不入队。
         await (_db.update(_db.conversations)
               ..where((t) => t.id.equals(conversation.id)))
             .write(
           ConversationsCompanion(
             lastMessagePreview: Value(_preview(stored.content)),
             lastMessageAt: Value(now),
-            updatedAt: Value(now),
-            version: Value(conversation.version + 1),
           ),
         );
       }
+      // §7.3：仅消息入队 create（会话摘要为派生数据，不入队）。
+      await _syncOperationRepository.enqueue(
+        buildSyncOperation(
+          entity: stored,
+          entityType: 'message',
+          kind: SyncOperationKind.create,
+          userId: _userId,
+          deviceId: _deviceId,
+          now: now,
+        ),
+      );
     });
     return stored;
   }
 
   @override
   Future<void> clearMessages(String conversationId) async {
-    // F2：消息独立于会话（无外键级联）。在同一事务内删除消息并重置会话摘要，
-    // 避免清空后仍残留旧预览与最近消息时间；M2 起删除改由同步墓碑表达。
+    // §8：物理删除改为墓碑化（deletedAt/updatedAt/version+1），并逐条入队 message
+    // delete；会话摘要重置遵循 §7.4（不改 updatedAt、不 bump version、不入队）。
     await _db.transaction(() async {
-      await (_db.delete(_db.messages)
-            ..where((t) => t.conversationId.equals(conversationId)))
-          .go();
+      final now = _clock.now();
+      final rows = await (_db.select(_db.messages)
+            ..where(
+              (t) =>
+                  t.conversationId.equals(conversationId) & t.deletedAt.isNull(),
+            ))
+          .get();
+      final operations = <SyncOperation>[];
+      for (final row in rows) {
+        await (_db.update(_db.messages)..where((t) => t.id.equals(row.id)))
+            .write(
+          MessagesCompanion(
+            deletedAt: Value(now),
+            updatedAt: Value(now),
+            version: Value(row.version + 1),
+          ),
+        );
+        operations.add(
+          buildSyncOperation(
+            entity: _toMessage(row).copyWith(
+              deletedAt: now,
+              updatedAt: now,
+              version: row.version + 1,
+            ),
+            entityType: 'message',
+            kind: SyncOperationKind.delete,
+            userId: _userId,
+            deviceId: _deviceId,
+            now: now,
+          ),
+        );
+      }
+      await _syncOperationRepository.enqueueAll(operations);
       final conversation = await (_db.select(_db.conversations)
             ..where((t) => t.id.equals(conversationId)))
           .getSingleOrNull();
       if (conversation == null) {
         return;
       }
-      final now = _clock.now();
       await (_db.update(_db.conversations)
             ..where((t) => t.id.equals(conversationId)))
           .write(
         ConversationsCompanion(
           lastMessagePreview: const Value<String?>(null),
           lastMessageAt: const Value<DateTime?>(null),
-          updatedAt: Value(now),
-          version: Value(conversation.version + 1),
         ),
       );
     });
@@ -194,40 +263,65 @@ class ConversationRepositoryImpl implements ConversationRepository {
 
   @override
   Future<void> deleteConversation(String conversationId) async {
-    final existing = await (_db.select(_db.conversations)
-          ..where((t) => t.id.equals(conversationId)))
-        .getSingleOrNull();
-    if (existing == null) {
-      return;
-    }
-    final now = _clock.now();
-    await (_db.update(_db.conversations)
-          ..where((t) => t.id.equals(conversationId)))
-        .write(
-      ConversationsCompanion(
-        deletedAt: Value(now),
-        updatedAt: Value(now),
-        version: Value(existing.version + 1),
-      ),
-    );
+    await _db.transaction(() async {
+      final existing = await (_db.select(_db.conversations)
+            ..where((t) => t.id.equals(conversationId)))
+          .getSingleOrNull();
+      if (existing == null) {
+        return;
+      }
+      final now = _clock.now();
+      // 墓碑快照须含 deletedAt（§6/§7.3）。
+      final tombstone = _toConversation(existing).copyWith(
+        deletedAt: now,
+        updatedAt: now,
+        version: existing.version + 1,
+      );
+      await (_db.update(_db.conversations)
+            ..where((t) => t.id.equals(conversationId)))
+          .write(
+        ConversationsCompanion(
+          deletedAt: Value(now),
+          updatedAt: Value(now),
+          version: Value(existing.version + 1),
+        ),
+      );
+      await _syncOperationRepository.enqueue(
+        buildSyncOperation(
+          entity: tombstone,
+          entityType: 'conversation',
+          kind: SyncOperationKind.delete,
+          userId: _userId,
+          deviceId: _deviceId,
+          now: now,
+        ),
+      );
+    });
   }
 
   @override
   Future<Conversation> ensureDefaultConversation() async {
     // F4：仅当不存在活跃（deletedAt 为 null）会话时才创建；全部软删后会重建默认会话。
-    final active = await (_db.select(_db.conversations)
-          ..where((t) => t.deletedAt.isNull())
-          ..orderBy([
-            (t) =>
-                OrderingTerm(expression: t.lastMessageAt, mode: OrderingMode.desc),
-            (t) =>
-                OrderingTerm(expression: t.createdAt, mode: OrderingMode.desc),
-          ]))
-        .get();
-    if (active.isNotEmpty) {
-      return _toConversation(active.first);
-    }
-    return createConversation(title: 'AI助手');
+    // §7.1：整个「查找或创建」包在同一事务内；createConversation 入队 create。
+    return _db.transaction(() async {
+      final active = await (_db.select(_db.conversations)
+            ..where((t) => t.deletedAt.isNull())
+            ..orderBy([
+              (t) => OrderingTerm(
+                    expression: t.lastMessageAt,
+                    mode: OrderingMode.desc,
+                  ),
+              (t) => OrderingTerm(
+                    expression: t.createdAt,
+                    mode: OrderingMode.desc,
+                  ),
+            ]))
+          .get();
+      if (active.isNotEmpty) {
+        return _toConversation(active.first);
+      }
+      return createConversation(title: 'AI助手');
+    });
   }
 
   /// 会话摘要截断到约 50 个字素，避免把 emoji / 组合字符从中间切断（F11）。

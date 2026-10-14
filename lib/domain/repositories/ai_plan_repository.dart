@@ -16,4 +16,8 @@ abstract interface class AIPlanRepository {
 
   /// 拒绝：标记 rejected + rejectedAt。
   Future<void> reject(String planId);
+
+  /// 惰性过期：仅当计划存在且处于 awaitingConfirmation 时置 expired + expiredAt，
+  /// 同事务入队 `ai_plan` update；异常冒泡整体回滚（§9/§14）。
+  Future<void> markExpired(List<String> ids);
 }

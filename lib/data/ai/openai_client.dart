@@ -20,14 +20,18 @@ class OpenAIClient implements AIClient {
   })  : _apiKeyProvider = apiKeyProvider,
         _httpClient = httpClient ?? http.Client();
 
-  /// 任务拆解系统提示版本；落库用于回溯（§6.1）。
-  static const String planPromptVersion = 'm1-plan-v1';
+  /// 任务拆解系统提示版本；落库用于回溯（§6.1/§10）。
+  static const String planPromptVersion = 'm2a-plan-v1';
 
-  /// 任务拆解系统提示（§6.1 原文，中文，要求只输出 JSON）。
-  static const String planSystemPrompt = '你是「Alice」的个人执行助手。请把用户最近的需求拆解为任务清单，只返回 JSON：\n'
-      '{"intent":"一句话概括意图","tasks":[{"title":"任务标题","description":"可选说明","priority":"low|medium|high|urgent","dueAt":"可选，ISO8601 日期或 null"}]}\n'
-      '规则：1) 只输出 JSON，不要任何额外文字；2) 无法拆解时返回空 tasks，并用 intent 说明原因；\n'
-      '3) 不要编造用户未提出的截止时间。';
+  /// 任务拆解系统提示（§10 原文，中文，要求只输出 JSON）。
+  ///
+  /// M2a 起支持 `scheduleTask`：额外输出 `schedules` 数组（`title` 必填、
+  /// `startAt`/`endAt` 为 ISO8601、`note` 可选）；`tasks` 语义不变。
+  static const String planSystemPrompt = '你是「Alice」的个人执行助手。请把用户最近的需求拆解为任务清单与可选日程，只返回 JSON：\n'
+      '{"intent":"一句话概括意图","tasks":[{"title":"任务标题","description":"可选说明","priority":"low|medium|high|urgent","dueAt":"可选，ISO8601 日期或 null"}],"schedules":[{"title":"日程标题","startAt":"ISO8601 开始时间","endAt":"ISO8601 结束时间","note":"可选备注"}]}\n'
+      '规则：1) 只输出 JSON，不要任何额外文字；2) 无法拆解时返回空 tasks 与空 schedules，并用 intent 说明原因；\n'
+      '3) 不要编造用户未提出的截止时间；4) 仅在用户明确要求安排时间时才输出 schedules，且 endAt 必须晚于 startAt；\n'
+      '5) 不需要日程时可省略 schedules 或返回空数组。';
 
   /// 合法优先级枚举（小写）。
   static const Set<String> _planPriorities = <String>{
@@ -253,7 +257,50 @@ class OpenAIClient implements AIClient {
       );
     }
 
+    // 规则 6（§10）：schedules 可选；缺省视为空。每项校验 title 非空、
+    // startAt/endAt 可解析且 endAt > startAt（解析后比较），否则判非法。
+    final rawSchedules = decoded['schedules'];
+    if (rawSchedules != null) {
+      if (rawSchedules is! List) {
+        throw const PlanValidationException('AI 返回的任务计划格式无效');
+      }
+      for (final item in rawSchedules) {
+        if (item is! Map<String, dynamic>) {
+          throw const PlanValidationException('AI 返回的任务计划格式无效');
+        }
+        final title = item['title'];
+        if (title is! String || title.isEmpty) {
+          throw const PlanValidationException('AI 返回的任务计划格式无效');
+        }
+        final startAt = _parsePlanDateTime(item['startAt']);
+        final endAt = _parsePlanDateTime(item['endAt']);
+        if (startAt == null || endAt == null || !endAt.isAfter(startAt)) {
+          throw const PlanValidationException('AI 返回的任务计划格式无效');
+        }
+        final payload = <String, Object?>{
+          'title': title,
+          'startAt': startAt.toLocal().toIso8601String(),
+          'endAt': endAt.toLocal().toIso8601String(),
+        };
+        final note = item['note'];
+        if (note is String) {
+          payload['note'] = note;
+        }
+        changes.add(
+          AIPlanChange(type: AIPlanChangeType.scheduleTask, payload: payload),
+        );
+      }
+    }
+
     return (model: model, changes: changes);
+  }
+
+  /// 解析计划中的 ISO8601 时间字符串；缺失、非字符串或不可解析返回 null。
+  DateTime? _parsePlanDateTime(Object? value) {
+    if (value is! String) {
+      return null;
+    }
+    return DateTime.tryParse(value);
   }
 
   /// 解析 OpenAI 兼容响应；结构异常时抛 [AIProviderException]。

@@ -2,9 +2,14 @@ import 'package:characters/characters.dart';
 import 'package:chatwithalice/core/time/clock.dart';
 import 'package:chatwithalice/data/local/app_database.dart';
 import 'package:chatwithalice/data/local/conversation_repository_impl.dart';
+import 'package:chatwithalice/data/local/sync_operation_repository_impl.dart';
 import 'package:chatwithalice/data/memory/memory_conversation_repository.dart';
+import 'package:chatwithalice/data/memory/memory_store.dart';
+import 'package:chatwithalice/data/memory/memory_sync_operation_repository.dart';
 import 'package:chatwithalice/domain/entities/conversation.dart';
+import 'package:chatwithalice/domain/entities/sync.dart';
 import 'package:chatwithalice/domain/repositories/conversation_repository.dart';
+import 'package:chatwithalice/domain/repositories/sync_operation_repository.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -36,11 +41,22 @@ Message _message(String conversationId, String content) {
   );
 }
 
-/// 被测实现与资源释放器的组合。
+/// 从队列中筛出指定类型与操作类别。
+List<SyncOperation> _opsOf(
+  List<SyncOperation> all,
+  String entityType,
+  SyncOperationKind kind,
+) =>
+    all
+        .where((op) => op.entityType == entityType && op.kind == kind)
+        .toList(growable: false);
+
+/// 被测实现、共享队列与资源释放器的组合。
 class _Harness {
-  _Harness(this.repository, this._dispose);
+  _Harness(this.repository, this.syncOperationRepository, this._dispose);
 
   final ConversationRepository repository;
+  final SyncOperationRepository syncOperationRepository;
   final Future<void> Function() _dispose;
 
   Future<void> dispose() => _dispose();
@@ -77,7 +93,59 @@ void _runContract(
       expect((await repository.getConversations()).length, 1);
     });
 
-    test('addMessage 更新会话摘要与版本', () async {
+    test('createConversation 入队 conversation create，身份与 payload 正确', () async {
+      final conversation = await repository.createConversation(title: '写作助手');
+
+      final creates = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'conversation',
+        SyncOperationKind.create,
+      );
+      expect(creates, hasLength(1));
+      final op = creates.single;
+      expect(op.entityId, conversation.id);
+      expect(op.userId, 'user-1');
+      expect(op.deviceId, 'device-1');
+      expect(op.version, 1);
+      expect(op.status, SyncOperationStatus.pending);
+      expect(op.payload['id'], conversation.id);
+      expect(op.payload['title'], '写作助手');
+    });
+
+    test('updateConversation 入队 conversation update（快照=最终实体）', () async {
+      final conversation = await repository.createConversation(title: '旧标题');
+      clock.current = clock.current.add(const Duration(minutes: 1));
+
+      await repository.updateConversation(conversation.copyWith(title: '新标题'));
+
+      final updates = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'conversation',
+        SyncOperationKind.update,
+      );
+      expect(updates, hasLength(1));
+      expect(updates.single.entityId, conversation.id);
+      expect(updates.single.payload['title'], '新标题');
+    });
+
+    test('deleteConversation 入队 conversation delete（快照含 deletedAt）', () async {
+      final conversation = await repository.createConversation(title: '待删');
+      clock.current = clock.current.add(const Duration(minutes: 1));
+
+      await repository.deleteConversation(conversation.id);
+
+      final deletes = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'conversation',
+        SyncOperationKind.delete,
+      );
+      expect(deletes, hasLength(1));
+      expect(deletes.single.entityId, conversation.id);
+      expect(deletes.single.payload['deletedAt'], isNotNull);
+    });
+
+    test('addMessage 更新摘要但不 bump 会话 version/updatedAt，仅入队 message create（§7.4）',
+        () async {
       final conversation = await repository.createConversation(title: '测试');
       clock.current = clock.current.add(const Duration(minutes: 1));
 
@@ -91,7 +159,13 @@ void _runContract(
       final updated = await repository.getConversation(conversation.id);
       expect(updated!.lastMessagePreview, '第一条消息');
       expect(updated.lastMessageAt, clock.current);
-      expect(updated.version, 2);
+      // §7.4：派生摘要不 bump version、不改 updatedAt。
+      expect(updated.version, conversation.version);
+      expect(updated.updatedAt, conversation.updatedAt);
+
+      final pending = await harness.syncOperationRepository.getPending();
+      expect(_opsOf(pending, 'message', SyncOperationKind.create), hasLength(1));
+      expect(_opsOf(pending, 'conversation', SyncOperationKind.update), isEmpty);
     });
 
     test('摘要按字素截断，不切断 emoji（F11）', () async {
@@ -148,24 +222,40 @@ void _runContract(
       await future;
     });
 
-    test('clearMessages 清空消息并重置会话摘要/时间/版本（F2）', () async {
+    test('clearMessages 墓碑化消息：列表不含已删、逐条入队 delete、摘要重置但不 bump 会话版本（§8/§7.4）',
+        () async {
       final conversation = await repository.createConversation(title: '测试');
       clock.current = clock.current.add(const Duration(minutes: 1));
       await repository.addMessage(_message(conversation.id, '你好'));
+      clock.current = clock.current.add(const Duration(minutes: 1));
+      await repository.addMessage(_message(conversation.id, '世界'));
 
       final beforeClear = (await repository.getConversation(conversation.id))!;
-      expect(beforeClear.lastMessagePreview, '你好');
+      expect(beforeClear.lastMessagePreview, '世界');
       expect(beforeClear.lastMessageAt, isNotNull);
 
       clock.current = clock.current.add(const Duration(minutes: 1));
       await repository.clearMessages(conversation.id);
 
-      final afterClear = (await repository.getConversation(conversation.id))!;
+      // 查询过滤 deletedAt IS NULL。
       expect(await repository.getMessages(conversation.id), isEmpty);
+      // 摘要重置但不改 updatedAt、不 bump version（§7.4）。
+      final afterClear = (await repository.getConversation(conversation.id))!;
       expect(afterClear.lastMessagePreview, isNull);
       expect(afterClear.lastMessageAt, isNull);
-      expect(afterClear.updatedAt, clock.current);
-      expect(afterClear.version, beforeClear.version + 1);
+      expect(afterClear.version, beforeClear.version);
+      expect(afterClear.updatedAt, beforeClear.updatedAt);
+
+      // 逐条墓碑化入队 message delete ×2，快照含 deletedAt。
+      final deletes = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'message',
+        SyncOperationKind.delete,
+      );
+      expect(deletes, hasLength(2));
+      for (final op in deletes) {
+        expect(op.payload['deletedAt'], isNotNull);
+      }
     });
 
     test('deleteConversation 软删除后不再出现在查询中', () async {
@@ -194,12 +284,19 @@ void _runContract(
       ]);
     });
 
-    test('ensureDefaultConversation 幂等', () async {
+    test('ensureDefaultConversation 幂等且真正创建时仅入队一次 create', () async {
       final first = await repository.ensureDefaultConversation();
       final second = await repository.ensureDefaultConversation();
       expect(first.title, 'AI助手');
       expect(first.id, second.id);
       expect((await repository.getConversations()).length, 1);
+
+      final creates = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'conversation',
+        SyncOperationKind.create,
+      );
+      expect(creates, hasLength(1));
     });
 
     test('全部软删后 ensureDefaultConversation 重建默认会话（F4）', () async {
@@ -233,12 +330,24 @@ void main() {
   _runContract(
     'MemoryConversationRepository',
     create: (clock) async {
-      final repository = MemoryConversationRepository(
+      final store = MemoryStore();
+      final syncOps = MemorySyncOperationRepository(
         clock: clock,
         userId: 'user-1',
         deviceId: 'device-1',
+        store: store,
       );
-      return _Harness(repository, () async => repository.dispose());
+      final repository = MemoryConversationRepository(
+        syncOperationRepository: syncOps,
+        clock: clock,
+        userId: 'user-1',
+        deviceId: 'device-1',
+        store: store,
+      );
+      return _Harness(repository, syncOps, () async {
+        repository.dispose();
+        syncOps.dispose();
+      });
     },
   );
 
@@ -246,13 +355,20 @@ void main() {
     'ConversationRepositoryImpl（Drift 内存库）',
     create: (clock) async {
       final database = AppDatabase(NativeDatabase.memory());
-      final repository = ConversationRepositoryImpl(
+      final syncOps = SyncOperationRepositoryImpl(
         database,
         clock,
         userId: 'user-1',
         deviceId: 'device-1',
       );
-      return _Harness(repository, () async => database.close());
+      final repository = ConversationRepositoryImpl(
+        database,
+        clock,
+        syncOperationRepository: syncOps,
+        userId: 'user-1',
+        deviceId: 'device-1',
+      );
+      return _Harness(repository, syncOps, () async => database.close());
     },
   );
 }

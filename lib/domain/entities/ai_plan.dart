@@ -1,6 +1,7 @@
 import 'package:uuid/uuid.dart';
 
 import '../../core/errors/app_exception.dart';
+import 'calendar.dart';
 import 'syncable_entity.dart';
 import 'task.dart';
 
@@ -96,6 +97,7 @@ class AIPlan extends SyncableEntity {
     this.confirmedAt,
     this.appliedAt,
     this.rejectedAt,
+    this.expiredAt,
   });
 
   /// 来源会话 ID。
@@ -128,6 +130,11 @@ class AIPlan extends SyncableEntity {
   /// 用户拒绝时间。
   final DateTime? rejectedAt;
 
+  /// 自动过期时间（惰性过期时写入）。
+  ///
+  /// 该字段**只设不清**，为 M2 约定的例外：`copyWith` 不提供 clearX（M2a §9）。
+  final DateTime? expiredAt;
+
   /// 复制并覆盖指定字段；未传入的字段保持不变。
   AIPlan copyWith({
     String? id,
@@ -147,6 +154,7 @@ class AIPlan extends SyncableEntity {
     DateTime? confirmedAt,
     DateTime? appliedAt,
     DateTime? rejectedAt,
+    DateTime? expiredAt,
   }) {
     return AIPlan(
       id: id ?? this.id,
@@ -166,6 +174,7 @@ class AIPlan extends SyncableEntity {
       confirmedAt: confirmedAt ?? this.confirmedAt,
       appliedAt: appliedAt ?? this.appliedAt,
       rejectedAt: rejectedAt ?? this.rejectedAt,
+      expiredAt: expiredAt ?? this.expiredAt,
     );
   }
 }
@@ -313,5 +322,56 @@ Task taskFromPlanChange(
     sourceMessageId: plan.sourceMessageId,
     sortOrder: 0,
   );
+}
+
+/// 将 scheduleTask 变更物化为 [CalendarEntry]。
+/// change.type != scheduleTask 时抛 [ConflictException]。
+///
+/// 物化规则（M2a §10）：新 id；`allDay=false`；`taskIds` 恒空
+/// （B5：M2a 不关联任务——AI 无从引用尚未生成的任务 id）；`note` 取自 payload。
+CalendarEntry calendarEntryFromPlanChange(
+  AIPlan plan,
+  AIPlanChange change, {
+  required String userId,
+  required String deviceId,
+  required DateTime now,
+}) {
+  if (change.type != AIPlanChangeType.scheduleTask) {
+    throw const ConflictException('计划变更类型不匹配，无法物化为日历条目');
+  }
+  final payload = change.payload;
+  final title = payload['title'];
+  if (title is! String || title.isEmpty) {
+    throw const PlanValidationException('AI 返回的任务计划格式无效');
+  }
+  final startAt = _planDateTime(payload['startAt']);
+  final endAt = _planDateTime(payload['endAt']);
+  if (startAt == null || endAt == null) {
+    throw const PlanValidationException('AI 返回的任务计划格式无效');
+  }
+  final note = payload['note'];
+  const uuid = Uuid();
+  return CalendarEntry(
+    id: uuid.v4(),
+    userId: userId,
+    createdAt: now,
+    updatedAt: now,
+    version: 1,
+    deviceId: deviceId,
+    title: title,
+    startAt: startAt,
+    endAt: endAt,
+    allDay: false,
+    taskIds: const <String>[],
+    note: note is String ? note : null,
+  );
+}
+
+/// 解析 payload 中的 ISO8601 时间字符串，统一转本地时间；非法返回 null。
+DateTime? _planDateTime(Object? value) {
+  if (value is! String) {
+    return null;
+  }
+  return DateTime.tryParse(value)?.toLocal();
 }
 

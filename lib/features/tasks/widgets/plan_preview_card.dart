@@ -78,7 +78,7 @@ class _PlanPreviewCardState extends State<PlanPreviewCard> {
             ),
             const SizedBox(height: 8),
             Text(
-              '将创建 ${widget.plan.changes.length} 个任务',
+              _buildSummary(),
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             ...widget.plan.changes.map((change) => _buildChange(change)),
@@ -102,8 +102,29 @@ class _PlanPreviewCardState extends State<PlanPreviewCard> {
     );
   }
 
-  /// 单条变更摘要（createTask 的 payload）。
+  /// 变更数量摘要：分别统计新建任务与新建日程。
+  String _buildSummary() {
+    final taskCount = widget.plan.changes
+        .where((c) => c.type == AIPlanChangeType.createTask)
+        .length;
+    final scheduleCount = widget.plan.changes
+        .where((c) => c.type == AIPlanChangeType.scheduleTask)
+        .length;
+    final parts = <String>[
+      if (taskCount > 0) '创建 $taskCount 个任务',
+      if (scheduleCount > 0) '创建 $scheduleCount 个日程',
+    ];
+    if (parts.isEmpty) {
+      return '共 ${widget.plan.changes.length} 项变更';
+    }
+    return '将 ${parts.join('、')}';
+  }
+
+  /// 单条变更摘要（createTask / scheduleTask 的 payload）。
   Widget _buildChange(AIPlanChange change) {
+    if (change.type == AIPlanChangeType.scheduleTask) {
+      return _buildScheduleChange(change);
+    }
     final payload = change.payload;
     final title = (payload['title'] as String?)?.trim();
     final priority = payload['priority'] as String?;
@@ -142,6 +163,46 @@ class _PlanPreviewCardState extends State<PlanPreviewCard> {
       ),
     );
   }
+
+  /// scheduleTask 变更摘要：「日程 · {title} · {HH:mm–HH:mm}」。
+  Widget _buildScheduleChange(AIPlanChange change) {
+    final payload = change.payload;
+    final title = (payload['title'] as String?)?.trim();
+    final start = _parseTime(payload['startAt']);
+    final end = _parseTime(payload['endAt']);
+    final timeText =
+        start != null && end != null ? '${_hhmm(start)}–${_hhmm(end)}' : null;
+    final titleText = title == null || title.isEmpty ? '未命名日程' : title;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text('• '),
+          Expanded(
+            child: Text(
+              timeText == null
+                  ? '日程 · $titleText'
+                  : '日程 · $titleText · $timeText',
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 解析 payload 中的时间字符串。
+  DateTime? _parseTime(Object? value) {
+    if (value is! String) {
+      return null;
+    }
+    return DateTime.tryParse(value)?.toLocal();
+  }
+
+  /// HH:mm。
+  String _hhmm(DateTime dt) =>
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
   /// 优先级文案（payload 存字符串枚举名）。
   String _priorityLabel(String priority) {

@@ -5,19 +5,20 @@ import '../../../core/ids/ids.dart';
 import '../../../core/time/clock.dart';
 import '../../../di.dart';
 import '../../../domain/entities/task.dart';
+import '../../../domain/repositories/project_repository.dart';
 import '../../../domain/repositories/task_repository.dart';
 
-/// 任务编辑对话框。
+/// 任务新建/编辑对话框。
 class TaskEditDialog extends StatefulWidget {
-  /// 创建对话框。
+  /// 创建对话框；[task] 非空为编辑态。
   const TaskEditDialog({super.key, this.task});
 
-  /// 初始任务（null 表示新建）。
+  /// 正在编辑的任务；为空表示新建。
   final Task? task;
 
-  /// 显示对话框。
-  static Future<Task?> show(BuildContext context, {Task? task}) {
-    return showDialog<Task>(
+  /// 打开对话框。
+  static Future<void> show(BuildContext context, {Task? task}) {
+    return showDialog<void>(
       context: context,
       builder: (context) => TaskEditDialog(task: task),
     );
@@ -33,15 +34,18 @@ class _TaskEditDialogState extends State<TaskEditDialog> {
   late final TextEditingController _descriptionController;
   late TaskPriority _priority;
   DateTime? _dueAt;
+  String? _projectId;
 
   @override
   void initState() {
     super.initState();
     final task = widget.task;
     _titleController = TextEditingController(text: task?.title ?? '');
-    _descriptionController = TextEditingController(text: task?.description ?? '');
+    _descriptionController =
+        TextEditingController(text: task?.description ?? '');
     _priority = task?.priority ?? TaskPriority.medium;
     _dueAt = task?.dueAt;
+    _projectId = task?.projectId;
   }
 
   @override
@@ -80,23 +84,25 @@ class _TaskEditDialogState extends State<TaskEditDialog> {
                 maxLines: 3,
               ),
               const SizedBox(height: 12),
+              _buildProjectDropdown(),
+              const SizedBox(height: 12),
               DropdownButtonFormField<TaskPriority>(
-                initialValue: _priority,
                 decoration: const InputDecoration(labelText: '优先级'),
+                initialValue: _priority,
                 items: const <DropdownMenuItem<TaskPriority>>[
-                  DropdownMenuItem(
+                  DropdownMenuItem<TaskPriority>(
                     value: TaskPriority.low,
                     child: Text('低'),
                   ),
-                  DropdownMenuItem(
+                  DropdownMenuItem<TaskPriority>(
                     value: TaskPriority.medium,
                     child: Text('中'),
                   ),
-                  DropdownMenuItem(
+                  DropdownMenuItem<TaskPriority>(
                     value: TaskPriority.high,
                     child: Text('高'),
                   ),
-                  DropdownMenuItem(
+                  DropdownMenuItem<TaskPriority>(
                     value: TaskPriority.urgent,
                     child: Text('紧急'),
                   ),
@@ -128,7 +134,8 @@ class _TaskEditDialogState extends State<TaskEditDialog> {
                         lastDate: DateTime(now.year + 5),
                       );
                       if (picked != null) {
-                        setState(() => _dueAt = DateTime(picked.year, picked.month, picked.day));
+                        setState(() => _dueAt =
+                            DateTime(picked.year, picked.month, picked.day));
                       }
                     },
                   ),
@@ -158,12 +165,48 @@ class _TaskEditDialogState extends State<TaskEditDialog> {
     );
   }
 
+  /// 项目下拉（可选）；空串哨兵代表「无项目」。
+  Widget _buildProjectDropdown() {
+    final repository = getIt<ProjectRepository>();
+    return StreamBuilder<List<Project>>(
+      stream: repository.watchProjects(),
+      builder: (context, snapshot) {
+        final projects = snapshot.data ?? const <Project>[];
+        // 项目已被删除时回退「无项目」（直接同步状态，避免下拉断言）。
+        if (_projectId != null && !projects.any((p) => p.id == _projectId)) {
+          _projectId = null;
+        }
+        return DropdownButtonFormField<String>(
+          decoration: const InputDecoration(labelText: '项目'),
+          initialValue: _projectId ?? '',
+          items: <DropdownMenuItem<String>>[
+            const DropdownMenuItem<String>(value: '', child: Text('无项目')),
+            for (final project in projects)
+              DropdownMenuItem<String>(
+                value: project.id,
+                child: Text(project.name),
+              ),
+          ],
+          onChanged: (value) {
+            setState(() {
+              _projectId = value == null || value.isEmpty ? null : value;
+            });
+          },
+        );
+      },
+    );
+  }
+
+  /// 保存；失败时抛出，由 [_save] 统一提示。
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) {
       return;
     }
     try {
       await _persist();
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
     } on AppException catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -178,50 +221,69 @@ class _TaskEditDialogState extends State<TaskEditDialog> {
     }
   }
 
-  /// 构造并保存任务；失败时抛出，由 [_save] 统一提示。
+  /// 构造并保存任务；id/userId/时间戳等由仓储统一维护。
   Future<void> _persist() async {
     final repository = getIt<TaskRepository>();
     final now = const SystemClock().now();
     final task = widget.task;
+    final description = _descriptionController.text.trim();
     if (task == null) {
       final newTask = Task(
         id: generateId(),
-        userId: newUserId(),
+        userId: '',
         createdAt: now,
         updatedAt: now,
         version: 1,
-        deviceId: newDeviceId(),
+        deviceId: '',
+        projectId: _projectId,
         title: _titleController.text.trim(),
-        description: _descriptionController.text.trim().isEmpty
-            ? null
-            : _descriptionController.text.trim(),
+        description: description.isEmpty ? null : description,
         priority: _priority,
         dueAt: _dueAt,
         sourceMessageId: null,
         sortOrder: 0,
       );
-      final saved = await repository.save(newTask);
-      if (mounted) {
-        Navigator.of(context).pop(saved);
-      }
+      await repository.save(newTask);
     } else {
       final updated = task.copyWith(
         title: _titleController.text.trim(),
-        description: _descriptionController.text.trim().isEmpty
-            ? null
-            : _descriptionController.text.trim(),
+        description: description.isEmpty ? null : description,
         priority: _priority,
         dueAt: _dueAt,
+        projectId: _projectId,
         clearDueAt: _dueAt == null && task.dueAt != null,
-        clearDescription:
-            _descriptionController.text.trim().isEmpty && task.description != null,
+        clearDescription: description.isEmpty && task.description != null,
         updatedAt: now,
         version: task.version + 1,
       );
-      final saved = await repository.save(updated);
-      if (mounted) {
-        Navigator.of(context).pop(saved);
-      }
+      // copyWith 无 clearProjectId，需要移除项目归属时重建实体。
+      final saved = _projectId == null && task.projectId != null
+          ? _detachProject(updated)
+          : updated;
+      await repository.save(saved);
     }
+  }
+
+  /// 复制任务并清空项目归属（规避 copyWith 无法置空的约定）。
+  Task _detachProject(Task task) {
+    return Task(
+      id: task.id,
+      userId: task.userId,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      deletedAt: task.deletedAt,
+      version: task.version,
+      deviceId: task.deviceId,
+      projectId: null,
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      priority: task.priority,
+      dueAt: task.dueAt,
+      parentTaskId: task.parentTaskId,
+      repeatRule: task.repeatRule,
+      sourceMessageId: task.sourceMessageId,
+      sortOrder: task.sortOrder,
+    );
   }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../core/errors/app_exception.dart';
@@ -5,11 +7,14 @@ import '../../di.dart';
 import '../../domain/entities/ai_plan.dart';
 import '../../domain/entities/task.dart';
 import '../../domain/repositories/ai_plan_repository.dart';
+import '../../domain/repositories/project_repository.dart';
 import '../../domain/repositories/task_repository.dart';
+import 'application/expire_pending_plans.dart';
 import 'widgets/plan_preview_card.dart';
+import 'widgets/project_manage_dialog.dart';
 import 'widgets/task_edit_dialog.dart';
 
-/// 任务页：过滤器+任务列表+AI拆解预览。
+/// 任务页：过滤器+项目分组+任务列表+AI拆解预览。
 class TasksScreen extends StatefulWidget {
   /// 创建任务页。
   const TasksScreen({super.key});
@@ -19,101 +24,145 @@ class TasksScreen extends StatefulWidget {
 }
 
 class _TasksScreenState extends State<TasksScreen> {
+  /// 「全部项目」的哨兵值（项目 id 为 uuid，不会冲突）。
+  static const String _allProjects = '__all__';
+
   final TaskRepository _taskRepository = getIt<TaskRepository>();
   final AIPlanRepository _aiPlanRepository = getIt<AIPlanRepository>();
+  final ProjectRepository _projectRepository = getIt<ProjectRepository>();
 
   String _filter = '今日';
+  String _projectFilter = _allProjects;
+
+  @override
+  void initState() {
+    super.initState();
+    // 启动即触发的惰性过期扫描（IndexedStack 构建即执行）；失败静默（§9）。
+    unawaited(_expirePendingPlans());
+  }
+
+  /// 扫描超期未确认的 AI 计划；异常静默，不阻塞任务页。
+  Future<void> _expirePendingPlans() async {
+    try {
+      await ExpirePendingPlans(aiPlanRepository: _aiPlanRepository).expire();
+    } catch (_) {
+      // 过期扫描失败无副作用，忽略。
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('任务'),
+        actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.folder_open),
+            tooltip: '项目管理',
+            onPressed: () => ProjectManageDialog.show(context),
+          ),
+        ],
       ),
       body: StreamBuilder<List<AIPlan>>(
         stream: _aiPlanRepository.watchPending(),
         builder: (context, pendingSnapshot) {
           final pendingPlans = pendingSnapshot.data ?? const <AIPlan>[];
-          return StreamBuilder<List<Task>>(
-            stream: _taskRepository.watchTasks(const TaskQuery()),
-            builder: (context, tasksSnapshot) {
-              final tasks = tasksSnapshot.data ?? const <Task>[];
-              final filtered = _filterTasks(tasks);
-              return CustomScrollView(
-                slivers: <Widget>[
-                  if (pendingPlans.isNotEmpty)
-                    SliverToBoxAdapter(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          const Padding(
-                            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-                            child: Text(
-                              '待确认的 AI 拆解',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
+          return StreamBuilder<List<Project>>(
+            stream: _projectRepository.watchProjects(),
+            builder: (context, projectsSnapshot) {
+              final projects = projectsSnapshot.data ?? const <Project>[];
+              // 选中项目若已被删除，回退「全部」。
+              final activeProject = projects.any((p) => p.id == _projectFilter)
+                  ? _projectFilter
+                  : _allProjects;
+              return StreamBuilder<List<Task>>(
+                stream: _taskRepository.watchTasks(const TaskQuery()),
+                builder: (context, tasksSnapshot) {
+                  final tasks = tasksSnapshot.data ?? const <Task>[];
+                  final filtered = _filterTasks(tasks, activeProject);
+                  return CustomScrollView(
+                    slivers: <Widget>[
+                      if (pendingPlans.isNotEmpty)
+                        SliverToBoxAdapter(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+                                child: Text(
+                                  '待确认的 AI 拆解',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
+                                ),
                               ),
-                            ),
+                              ...pendingPlans.map((p) => PlanPreviewCard(plan: p)),
+                            ],
                           ),
-                          ...pendingPlans.map((p) => PlanPreviewCard(plan: p)),
-                        ],
-                      ),
-                    ),
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                      child: Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: <Widget>[
-                          ChoiceChip(
-                            label: const Text('今日'),
-                            selected: _filter == '今日',
-                            onSelected: (v) {
-                              if (v) setState(() => _filter = '今日');
-                            },
+                        ),
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: <Widget>[
+                              ChoiceChip(
+                                label: const Text('今日'),
+                                selected: _filter == '今日',
+                                onSelected: (v) {
+                                  if (v) setState(() => _filter = '今日');
+                                },
+                              ),
+                              ChoiceChip(
+                                label: const Text('待办'),
+                                selected: _filter == '待办',
+                                onSelected: (v) {
+                                  if (v) setState(() => _filter = '待办');
+                                },
+                              ),
+                              ChoiceChip(
+                                label: const Text('已完成'),
+                                selected: _filter == '已完成',
+                                onSelected: (v) {
+                                  if (v) setState(() => _filter = '已完成');
+                                },
+                              ),
+                            ],
                           ),
-                          ChoiceChip(
-                            label: const Text('待办'),
-                            selected: _filter == '待办',
-                            onSelected: (v) {
-                              if (v) setState(() => _filter = '待办');
-                            },
-                          ),
-                          ChoiceChip(
-                            label: const Text('已完成'),
-                            selected: _filter == '已完成',
-                            onSelected: (v) {
-                              if (v) setState(() => _filter = '已完成');
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  if (filtered.isEmpty)
-                    const SliverFillRemaining(
-                      hasScrollBody: false,
-                      child: Center(
-                        child: Text(
-                          '还没有任务，点右下角按钮新建，或让 Alice 帮你拆解',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.grey),
                         ),
                       ),
-                    )
-                  else
-                    SliverList(
-                      delegate: SliverChildBuilderDelegate(
-                        (context, index) {
-                          final task = filtered[index];
-                          return _buildTaskItem(task);
-                        },
-                        childCount: filtered.length,
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                          child: _buildProjectDropdown(projects, activeProject),
+                        ),
                       ),
-                    ),
-                ],
+                      if (filtered.isEmpty)
+                        const SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Center(
+                            child: Text(
+                              '还没有任务，点右下角按钮新建，或让 Alice 帮你拆解',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey),
+                            ),
+                          ),
+                        )
+                      else
+                        SliverList(
+                          delegate: SliverChildBuilderDelegate(
+                            (context, index) {
+                              final task = filtered[index];
+                              return _buildTaskItem(task);
+                            },
+                            childCount: filtered.length,
+                          ),
+                        ),
+                    ],
+                  );
+                },
               );
             },
           );
@@ -128,13 +177,46 @@ class _TasksScreenState extends State<TasksScreen> {
     );
   }
 
-  List<Task> _filterTasks(List<Task> tasks) {
+  /// 项目下拉：全部 + 各项目名；选中即本地过滤（不下推查询）。
+  Widget _buildProjectDropdown(
+    List<Project> projects,
+    String activeProject,
+  ) {
+    return DropdownButtonFormField<String>(
+      initialValue: activeProject,
+      isDense: true,
+      decoration: const InputDecoration(
+        labelText: '项目',
+        border: OutlineInputBorder(),
+        isDense: true,
+      ),
+      items: <DropdownMenuItem<String>>[
+        const DropdownMenuItem<String>(value: _allProjects, child: Text('全部')),
+        for (final project in projects)
+          DropdownMenuItem<String>(
+            value: project.id,
+            child: Text(project.name),
+          ),
+      ],
+      onChanged: (value) {
+        if (value != null) {
+          setState(() => _projectFilter = value);
+        }
+      },
+    );
+  }
+
+  /// 过滤：先按项目，再按状态/日期（集合过滤在 UI 本地做）。
+  List<Task> _filterTasks(List<Task> tasks, String projectFilter) {
+    final byProject = projectFilter == _allProjects
+        ? tasks
+        : tasks.where((t) => t.projectId == projectFilter).toList();
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final tomorrow = today.add(const Duration(days: 1));
     switch (_filter) {
       case '今日':
-        final list = tasks.where((t) {
+        final list = byProject.where((t) {
           if (t.status == TaskStatus.done || t.status == TaskStatus.cancelled) {
             return false;
           }
@@ -152,7 +234,7 @@ class _TasksScreenState extends State<TasksScreen> {
         });
         return list;
       case '待办':
-        final list = tasks
+        final list = byProject
             .where((t) =>
                 t.status == TaskStatus.inbox ||
                 t.status == TaskStatus.planned ||
@@ -161,14 +243,14 @@ class _TasksScreenState extends State<TasksScreen> {
         list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         return list;
       case '已完成':
-        final list = tasks
+        final list = byProject
             .where((t) =>
                 t.status == TaskStatus.done || t.status == TaskStatus.cancelled)
             .toList();
         list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         return list;
       default:
-        return tasks;
+        return byProject;
     }
   }
 

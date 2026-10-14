@@ -27,6 +27,9 @@ class _FakeAIPlanRepository implements AIPlanRepository {
 
   @override
   Future<List<AIPlan>> getPending() async => const <AIPlan>[];
+
+  @override
+  Future<void> markExpired(List<String> ids) async {}
 }
 
 void main() {

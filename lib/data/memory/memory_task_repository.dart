@@ -3,23 +3,38 @@ import 'dart:async';
 import '../../core/errors/app_exception.dart';
 import '../../core/ids/ids.dart';
 import '../../core/time/clock.dart';
+import '../../domain/entities/sync.dart';
 import '../../domain/entities/task.dart';
+import '../../domain/repositories/sync_operation_repository.dart';
 import '../../domain/repositories/task_repository.dart';
+import '../sync/sync_operation_factory.dart';
+import 'memory_store.dart';
 
 /// 内存任务仓储：行为与 Drift 实现一致，供测试与预览使用。
-class MemoryTaskRepository implements TaskRepository {
+///
+/// 写路径经 [MemoryStore.runAtomic] 包裹，事务中途异常时任务/队列一并还原
+/// （§7.2）。装配时若提供 [store] 则注册自身参与全或无回滚。
+class MemoryTaskRepository implements TaskRepository, MemoryStoreParticipant {
   /// 创建内存仓储；[userId]/[deviceId] 在本实例内固定。
   MemoryTaskRepository({
+    required SyncOperationRepository syncOperationRepository,
     String? userId,
     String? deviceId,
     Clock? clock,
+    MemoryStore? store,
   })  : _userId = userId ?? newUserId(),
         _deviceId = deviceId ?? newDeviceId(),
-        _clock = clock ?? const SystemClock();
+        _clock = clock ?? const SystemClock(),
+        _syncOperationRepository = syncOperationRepository,
+        _memoryStore = store {
+    store?.register(this);
+  }
 
   final String _userId;
   final String _deviceId;
   final Clock _clock;
+  final SyncOperationRepository _syncOperationRepository;
+  final MemoryStore? _memoryStore;
   final List<Task> _tasks = <Task>[];
   final StreamController<void> _changes = StreamController<void>.broadcast();
 
@@ -48,86 +63,159 @@ class MemoryTaskRepository implements TaskRepository {
   Future<List<Task>> getTasks(TaskQuery query) async => _query(query);
 
   @override
-  Future<Task> save(Task task) async {
-    final now = _clock.now();
-    final index = _indexOf(task.id);
-    if (index < 0) {
-      final stored = task.copyWith(
-        id: task.id.isEmpty ? generateId() : task.id,
+  Future<Task> save(Task task) {
+    return _atomic(() async {
+      final now = _clock.now();
+      final index = _indexOf(task.id);
+      if (index < 0) {
+        final stored = task.copyWith(
+          id: task.id.isEmpty ? generateId() : task.id,
+          userId: _userId,
+          deviceId: _deviceId,
+          createdAt: now,
+          updatedAt: now,
+          version: 1,
+        );
+        _tasks.add(stored);
+        await _syncOperationRepository.enqueue(
+          buildSyncOperation(
+            entity: stored,
+            entityType: 'task',
+            kind: SyncOperationKind.create,
+            userId: _userId,
+            deviceId: _deviceId,
+            now: now,
+          ),
+        );
+        _notify();
+        return stored;
+      }
+      final existing = _tasks[index];
+      final updated = task.copyWith(
+        id: existing.id,
         userId: _userId,
         deviceId: _deviceId,
-        createdAt: now,
+        createdAt: existing.createdAt,
         updatedAt: now,
-        version: 1,
+        version: existing.version + 1,
       );
-      _tasks.add(stored);
+      _tasks[index] = updated;
+      await _syncOperationRepository.enqueue(
+        buildSyncOperation(
+          entity: updated,
+          entityType: 'task',
+          kind: SyncOperationKind.update,
+          userId: _userId,
+          deviceId: _deviceId,
+          now: now,
+        ),
+      );
       _notify();
-      return stored;
-    }
-    final existing = _tasks[index];
-    final updated = task.copyWith(
-      id: existing.id,
-      userId: _userId,
-      deviceId: _deviceId,
-      createdAt: existing.createdAt,
-      updatedAt: now,
-      version: existing.version + 1,
-    );
-    _tasks[index] = updated;
-    _notify();
-    return updated;
+      return updated;
+    });
   }
 
   @override
-  Future<void> applyChanges(List<TaskChange> changes) async {
-    // 先全量校验（含目标存在性），再一次性提交，保证全或无（S2）。
-    for (final change in changes) {
-      switch (change) {
-        case TaskInserted():
-          break;
-        case TaskUpdated(:final task):
-          if (_indexOf(task.id) < 0) {
-            throw const ConflictException('任务不存在，无法更新');
-          }
-        case TaskDeleted(:final id):
-          if (_indexOf(id) < 0) {
-            throw const ConflictException('任务不存在，无法删除');
-          }
+  Future<void> applyChanges(List<TaskChange> changes) {
+    return _atomic(() async {
+      // 先全量校验（含目标存在性），再一次性提交，保证全或无（S2）。
+      for (final change in changes) {
+        switch (change) {
+          case TaskInserted():
+            break;
+          case TaskUpdated(:final task):
+            if (_indexOf(task.id) < 0) {
+              throw const ConflictException('任务不存在，无法更新');
+            }
+          case TaskDeleted(:final id):
+            if (_indexOf(id) < 0) {
+              throw const ConflictException('任务不存在，无法删除');
+            }
+        }
       }
-    }
 
-    final now = _clock.now();
-    for (final change in changes) {
-      switch (change) {
-        case TaskInserted(:final task):
-          final stored = task.copyWith(
-            id: task.id.isEmpty ? generateId() : task.id,
-            userId: _userId,
-            deviceId: _deviceId,
-          );
-          _tasks.add(stored);
-        case TaskUpdated(:final task):
-          final index = _indexOf(task.id);
-          final existing = _tasks[index];
-          _tasks[index] = task.copyWith(
-            id: existing.id,
-            userId: _userId,
-            deviceId: _deviceId,
-            createdAt: existing.createdAt,
-            updatedAt: now,
-            version: existing.version + 1,
-          );
-        case TaskDeleted(:final id):
-          final index = _indexOf(id);
-          final existing = _tasks[index];
-          _tasks[index] = existing.copyWith(
-            deletedAt: now,
-            updatedAt: now,
-            version: existing.version + 1,
-          );
+      final now = _clock.now();
+      for (final change in changes) {
+        switch (change) {
+          case TaskInserted(:final task):
+            final stored = task.copyWith(
+              id: task.id.isEmpty ? generateId() : task.id,
+              userId: _userId,
+              deviceId: _deviceId,
+            );
+            _tasks.add(stored);
+            await _syncOperationRepository.enqueue(
+              buildSyncOperation(
+                entity: stored,
+                entityType: 'task',
+                kind: SyncOperationKind.create,
+                userId: _userId,
+                deviceId: _deviceId,
+                now: now,
+              ),
+            );
+          case TaskUpdated(:final task):
+            final index = _indexOf(task.id);
+            final existing = _tasks[index];
+            final updated = task.copyWith(
+              id: existing.id,
+              userId: _userId,
+              deviceId: _deviceId,
+              createdAt: existing.createdAt,
+              updatedAt: now,
+              version: existing.version + 1,
+            );
+            _tasks[index] = updated;
+            await _syncOperationRepository.enqueue(
+              buildSyncOperation(
+                entity: updated,
+                entityType: 'task',
+                kind: SyncOperationKind.update,
+                userId: _userId,
+                deviceId: _deviceId,
+                now: now,
+              ),
+            );
+          case TaskDeleted(:final id):
+            final index = _indexOf(id);
+            final existing = _tasks[index];
+            final tombstone = existing.copyWith(
+              deletedAt: now,
+              updatedAt: now,
+              version: existing.version + 1,
+            );
+            _tasks[index] = tombstone;
+            await _syncOperationRepository.enqueue(
+              buildSyncOperation(
+                entity: tombstone,
+                entityType: 'task',
+                kind: SyncOperationKind.delete,
+                userId: _userId,
+                deviceId: _deviceId,
+                now: now,
+              ),
+            );
+        }
       }
-    }
+      _notify();
+    });
+  }
+
+  @override
+  Object? snapshot() => List<Task>.of(_tasks);
+
+  @override
+  void restore(Object? snapshot) {
+    _tasks
+      ..clear()
+      ..addAll(snapshot! as List<Task>);
     _notify();
+  }
+
+  /// 在 [MemoryStore] 全或无接缝内执行 [action]（无 store 时直接执行）。
+  Future<T> _atomic<T>(Future<T> Function() action) {
+    final store = _memoryStore;
+    return store == null ? action() : store.runAtomic(action);
   }
 
   /// 释放内部流资源（仅测试/预览使用）。

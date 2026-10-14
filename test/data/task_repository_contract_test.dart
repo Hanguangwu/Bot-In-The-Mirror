@@ -1,9 +1,14 @@
 import 'package:chatwithalice/core/errors/app_exception.dart';
 import 'package:chatwithalice/core/time/clock.dart';
 import 'package:chatwithalice/data/local/app_database.dart';
+import 'package:chatwithalice/data/local/sync_operation_repository_impl.dart';
 import 'package:chatwithalice/data/local/task_repository_impl.dart';
+import 'package:chatwithalice/data/memory/memory_store.dart';
+import 'package:chatwithalice/data/memory/memory_sync_operation_repository.dart';
 import 'package:chatwithalice/data/memory/memory_task_repository.dart';
+import 'package:chatwithalice/domain/entities/sync.dart';
 import 'package:chatwithalice/domain/entities/task.dart';
+import 'package:chatwithalice/domain/repositories/sync_operation_repository.dart';
 import 'package:chatwithalice/domain/repositories/task_repository.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,16 +21,6 @@ class _MutableClock implements Clock {
 
   @override
   DateTime now() => current;
-}
-
-/// 被测实现与资源释放器的组合。
-class _Harness {
-  _Harness(this.repository, this._dispose);
-
-  final TaskRepository repository;
-  final Future<void> Function() _dispose;
-
-  Future<void> dispose() => _dispose();
 }
 
 /// 构造任务实体（id/userId/deviceId/时间由仓储在写入时维护）。
@@ -52,6 +47,27 @@ Task _task({
     priority: priority,
     dueAt: dueAt,
   );
+}
+
+/// 从队列中筛出指定类型与操作类别。
+List<SyncOperation> _opsOf(
+  List<SyncOperation> all,
+  String entityType,
+  SyncOperationKind kind,
+) =>
+    all
+        .where((op) => op.entityType == entityType && op.kind == kind)
+        .toList(growable: false);
+
+/// 被测实现、共享队列与资源释放器的组合。
+class _Harness {
+  _Harness(this.repository, this.syncOperationRepository, this._dispose);
+
+  final TaskRepository repository;
+  final SyncOperationRepository syncOperationRepository;
+  final Future<void> Function() _dispose;
+
+  Future<void> dispose() => _dispose();
 }
 
 /// 对内存实现与 Drift 实现跑同一组契约断言，保证两种实现行为一致。
@@ -114,6 +130,34 @@ void _runContract(
       expect(loaded.description, '详细说明');
       expect(loaded.status, TaskStatus.doing);
       expect(loaded.priority, TaskPriority.high);
+    });
+
+    test('save 新建入队 task create，更新入队 task update（快照=最终实体）', () async {
+      final created = await repository.save(_task(id: '', title: '新任务'));
+
+      var creates = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'task',
+        SyncOperationKind.create,
+      );
+      expect(creates, hasLength(1));
+      expect(creates.single.entityId, created.id);
+      expect(creates.single.userId, 'user-1');
+      expect(creates.single.deviceId, 'device-1');
+      expect(creates.single.status, SyncOperationStatus.pending);
+      expect(creates.single.payload['title'], '新任务');
+
+      clock.current = clock.current.add(const Duration(minutes: 1));
+      await repository.save(created.copyWith(title: '改后'));
+
+      final updates = _opsOf(
+        await harness.syncOperationRepository.getPending(),
+        'task',
+        SyncOperationKind.update,
+      );
+      expect(updates, hasLength(1));
+      expect(updates.single.entityId, created.id);
+      expect(updates.single.payload['title'], '改后');
     });
 
     test('getTasks 只返回未软删任务；软删后不再出现', () async {
@@ -227,6 +271,35 @@ void _runContract(
       expect(tasks.firstWhere((task) => task.id == 't2').version, 1);
     });
 
+    test('applyChanges 逐事件入队 task create/update/delete（快照含 deletedAt）', () async {
+      await repository.save(_task(id: 't1', title: '旧'));
+      await repository.save(_task(id: 't3', title: '待删'));
+      clock.current = clock.current.add(const Duration(minutes: 1));
+
+      await repository.applyChanges(<TaskChange>[
+        TaskInserted(_task(id: 't2', title: '新')),
+        TaskUpdated(_task(id: 't1', title: '更新')),
+        const TaskDeleted('t3'),
+      ]);
+
+      final pending = await harness.syncOperationRepository.getPending();
+      final inserts = _opsOf(pending, 'task', SyncOperationKind.create)
+          .where((op) => op.entityId == 't2')
+          .toList();
+      expect(inserts, hasLength(1));
+      final updates = _opsOf(pending, 'task', SyncOperationKind.update)
+          .where((op) => op.entityId == 't1')
+          .toList();
+      expect(updates, hasLength(1));
+      expect(updates.single.payload['title'], '更新');
+      final deletes = _opsOf(pending, 'task', SyncOperationKind.delete)
+          .where((op) => op.entityId == 't3')
+          .toList();
+      expect(deletes, hasLength(1));
+      expect(deletes.single.entityId, 't3');
+      expect(deletes.single.payload['deletedAt'], isNotNull);
+    });
+
     test('applyChanges 校验失败整体回滚：插入不落库', () async {
       await expectLater(
         repository.applyChanges(<TaskChange>[
@@ -249,6 +322,19 @@ void _runContract(
 
       expect(await repository.getTasks(const TaskQuery()), isEmpty);
     });
+
+    test('回滚不留孤儿操作：中途失败时实体与队列均无残留（§12.7）', () async {
+      await expectLater(
+        repository.applyChanges(<TaskChange>[
+          TaskInserted(_task(id: 'ghost', title: '应回滚')),
+          const TaskDeleted('missing'),
+        ]),
+        throwsA(isA<ConflictException>()),
+      );
+
+      expect(await repository.getTasks(const TaskQuery()), isEmpty);
+      expect(await harness.syncOperationRepository.getPending(), isEmpty);
+    });
   });
 }
 
@@ -256,12 +342,24 @@ void main() {
   _runContract(
     'MemoryTaskRepository',
     create: (clock) async {
-      final repository = MemoryTaskRepository(
+      final store = MemoryStore();
+      final syncOps = MemorySyncOperationRepository(
         clock: clock,
         userId: 'user-1',
         deviceId: 'device-1',
+        store: store,
       );
-      return _Harness(repository, () async => repository.dispose());
+      final repository = MemoryTaskRepository(
+        syncOperationRepository: syncOps,
+        clock: clock,
+        userId: 'user-1',
+        deviceId: 'device-1',
+        store: store,
+      );
+      return _Harness(repository, syncOps, () async {
+        repository.dispose();
+        syncOps.dispose();
+      });
     },
   );
 
@@ -269,13 +367,20 @@ void main() {
     'TaskRepositoryImpl（Drift 内存库）',
     create: (clock) async {
       final database = AppDatabase(NativeDatabase.memory());
-      final repository = TaskRepositoryImpl(
+      final syncOps = SyncOperationRepositoryImpl(
         database,
         clock,
         userId: 'user-1',
         deviceId: 'device-1',
       );
-      return _Harness(repository, () async => database.close());
+      final repository = TaskRepositoryImpl(
+        database,
+        clock,
+        syncOperationRepository: syncOps,
+        userId: 'user-1',
+        deviceId: 'device-1',
+      );
+      return _Harness(repository, syncOps, () async => database.close());
     },
   );
 }

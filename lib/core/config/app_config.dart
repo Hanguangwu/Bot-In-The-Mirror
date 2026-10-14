@@ -28,3 +28,8 @@ abstract final class AppConfig {
     'gpt-4o',
   ];
 }
+
+/// AI 待确认计划的自动过期时长（M2a §9，默认 48 小时）。
+///
+/// 读取时惰性判断：`createdAt` 距今超过该时长即标记 expired。
+const Duration aiPlanExpireAfter = Duration(hours: 48);

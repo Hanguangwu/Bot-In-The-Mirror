@@ -54,6 +54,9 @@ class _FakeAIPlanRepository implements AIPlanRepository {
 
   @override
   Future<void> reject(String planId) async {}
+
+  @override
+  Future<void> markExpired(List<String> ids) async {}
 }
 
 AIPlanChange _createTaskChange(String title) => AIPlanChange(

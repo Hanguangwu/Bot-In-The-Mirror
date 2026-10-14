@@ -2,6 +2,7 @@ import 'package:chatwithalice/core/errors/app_exception.dart';
 import 'package:chatwithalice/core/time/clock.dart';
 import 'package:chatwithalice/data/memory/memory_conversation_repository.dart';
 import 'package:chatwithalice/data/memory/memory_settings_store.dart';
+import 'package:chatwithalice/data/memory/memory_sync_operation_repository.dart';
 import 'package:chatwithalice/domain/ai/ai_client.dart';
 import 'package:chatwithalice/domain/entities/ai_plan.dart';
 import 'package:chatwithalice/domain/entities/ai_provider.dart';
@@ -62,7 +63,10 @@ void main() {
   );
 
   setUp(() async {
-    repository = MemoryConversationRepository(clock: _StepClock());
+    repository = MemoryConversationRepository(
+      syncOperationRepository: MemorySyncOperationRepository(),
+      clock: _StepClock(),
+    );
     settingsStore = MemorySettingsStore(initialProfile: profile);
     conversation = await repository.createConversation(title: '测试');
   });

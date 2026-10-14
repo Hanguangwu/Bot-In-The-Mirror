@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
-import 'home_screen.dart';
-import '../tasks/tasks_screen.dart';
+import '../calendar/calendar_screen.dart';
+import '../health/health_screen.dart';
 import '../settings/settings_screen.dart';
+import '../tasks/tasks_screen.dart';
+import 'home_screen.dart';
 
-/// 主壳：底部导航三区，保持各 tab 状态。
+/// 主壳：底部导航五区，保持各 tab 状态。
 class HomeShell extends StatefulWidget {
   /// 创建主壳。
   const HomeShell({super.key});
@@ -24,6 +26,8 @@ class _HomeShellState extends State<HomeShell> {
         children: const <Widget>[
           HomeScreen(),
           TasksScreen(),
+          CalendarScreen(),
+          HealthScreen(),
           SettingsScreen(),
         ],
       ),
@@ -42,6 +46,14 @@ class _HomeShellState extends State<HomeShell> {
           BottomNavigationBarItem(
             icon: Icon(Icons.checklist),
             label: '任务',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.calendar_month),
+            label: '日历',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.favorite_border),
+            label: '健康',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.settings),

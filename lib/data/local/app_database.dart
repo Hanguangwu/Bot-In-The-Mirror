@@ -214,12 +214,175 @@ class AiPlans extends Table {
   /// 用户拒绝时间。
   DateTimeColumn get rejectedAt => dateTime().nullable()();
 
+  /// 自动过期时间（schema v3 起；惰性过期时写入，只设不清）。
+  DateTimeColumn get expiredAt => dateTime().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }
 
-/// 本地 Drift 数据库（schemaVersion = 2）。
-@DriftDatabase(tables: [Conversations, Messages, Tasks, AiPlans])
+/// 同步操作表（schema v3）。字段与领域实体 `SyncOperation` 严格对应。
+///
+/// `kind`/`status` 为枚举列，一律存 TEXT（枚举 `.name`）；`payload` 存实体
+/// 快照 JSON 字符串（协议见 `lib/domain/sync/entity_serializer.dart`）。
+/// 队列自身写入永不入队（无回环）。
+@DataClassName('SyncOperationRow')
+@TableIndex(
+  name: 'idx_sync_operations_entity_status',
+  columns: {#entityType, #status},
+)
+@TableIndex(name: 'idx_sync_operations_entity_id', columns: {#entityId})
+class SyncOperations extends Table {
+  /// 同步操作 ID（客户端生成）。
+  TextColumn get id => text()();
+
+  /// 所属用户 ID。
+  TextColumn get userId => text()();
+
+  /// 创建时间。
+  DateTimeColumn get createdAt => dateTime()();
+
+  /// 更新时间。
+  DateTimeColumn get updatedAt => dateTime()();
+
+  /// 软删除墓碑时间。
+  DateTimeColumn get deletedAt => dateTime().nullable()();
+
+  /// 乐观并发版本。
+  IntColumn get version => integer().withDefault(const Constant(1))();
+
+  /// 来源设备 ID。
+  TextColumn get deviceId => text()();
+
+  /// 实体类型（如 `task` / `message`）。
+  TextColumn get entityType => text()();
+
+  /// 实体 ID。
+  TextColumn get entityId => text()();
+
+  /// 操作类型：create/update/delete（TEXT 枚举）。
+  TextColumn get kind => text()();
+
+  /// 变更载荷（实体快照 JSON 字符串）。
+  TextColumn get payload => text()();
+
+  /// 状态：pending/syncing/synced/failed/conflicted（TEXT 枚举）。
+  TextColumn get status => text()();
+
+  /// 重试次数。
+  IntColumn get retryCount => integer().withDefault(const Constant(0))();
+
+  /// 最近一次错误摘要。
+  TextColumn get lastError => text().nullable()();
+
+  /// 同步完成时间。
+  DateTimeColumn get syncedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// 日历条目表（schema v3）。字段与领域实体 `CalendarEntry` 严格对应；
+/// `taskIds` 存 JSON 字符串数组。
+@DataClassName('CalendarEntryRow')
+@TableIndex(
+  name: 'idx_calendar_entries_user_start_at',
+  columns: {#userId, #startAt},
+)
+class CalendarEntries extends Table {
+  /// 条目 ID（客户端生成）。
+  TextColumn get id => text()();
+
+  /// 所属用户 ID。
+  TextColumn get userId => text()();
+
+  /// 创建时间。
+  DateTimeColumn get createdAt => dateTime()();
+
+  /// 更新时间。
+  DateTimeColumn get updatedAt => dateTime()();
+
+  /// 软删除墓碑时间。
+  DateTimeColumn get deletedAt => dateTime().nullable()();
+
+  /// 乐观并发版本。
+  IntColumn get version => integer().withDefault(const Constant(1))();
+
+  /// 来源设备 ID。
+  TextColumn get deviceId => text()();
+
+  /// 标题。
+  TextColumn get title => text()();
+
+  /// 开始时间。
+  DateTimeColumn get startAt => dateTime()();
+
+  /// 结束时间。
+  DateTimeColumn get endAt => dateTime()();
+
+  /// 是否全天事件。
+  BoolColumn get allDay => boolean().withDefault(const Constant(false))();
+
+  /// 关联任务 ID 列表（JSON 字符串数组）。
+  TextColumn get taskIds => text().withDefault(const Constant('[]'))();
+
+  /// 备注。
+  TextColumn get note => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// 项目表（schema v3）。字段与领域实体 `Project` 严格对应。
+@DataClassName('ProjectRow')
+@TableIndex(name: 'idx_projects_user', columns: {#userId})
+class Projects extends Table {
+  /// 项目 ID（客户端生成）。
+  TextColumn get id => text()();
+
+  /// 所属用户 ID。
+  TextColumn get userId => text()();
+
+  /// 创建时间。
+  DateTimeColumn get createdAt => dateTime()();
+
+  /// 更新时间。
+  DateTimeColumn get updatedAt => dateTime()();
+
+  /// 软删除墓碑时间。
+  DateTimeColumn get deletedAt => dateTime().nullable()();
+
+  /// 乐观并发版本。
+  IntColumn get version => integer().withDefault(const Constant(1))();
+
+  /// 来源设备 ID。
+  TextColumn get deviceId => text()();
+
+  /// 项目名称。
+  TextColumn get name => text()();
+
+  /// 项目目标。
+  TextColumn get goal => text().nullable()();
+
+  /// 是否归档。
+  BoolColumn get isArchived => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// 本地 Drift 数据库（schemaVersion = 3）。
+@DriftDatabase(
+  tables: [
+    Conversations,
+    Messages,
+    Tasks,
+    AiPlans,
+    SyncOperations,
+    CalendarEntries,
+    Projects,
+  ],
+)
 class AppDatabase extends _$AppDatabase {
   /// 使用给定执行器创建数据库（测试可传内存执行器）。
   AppDatabase(super.e);
@@ -229,7 +392,7 @@ class AppDatabase extends _$AppDatabase {
       AppDatabase(driftDatabase(name: 'chatwithalice'));
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -246,12 +409,25 @@ class AppDatabase extends _$AppDatabase {
             await m.createIndex(idxTasksUserDueAt);
             await m.createIndex(idxAiPlansUserStatus);
           }
+          // v2 → v3：新增同步队列/日历/项目三表（含索引），并为 M1 存量
+          // `ai_plans` 表补 `expiredAt` 列（B3——createTable 不会补列）。
+          if (from < 3) {
+            await m.createTable(syncOperations);
+            await m.createTable(calendarEntries);
+            await m.createTable(projects);
+            await m.createIndex(idxSyncOperationsEntityStatus);
+            await m.createIndex(idxSyncOperationsEntityId);
+            await m.createIndex(idxCalendarEntriesUserStartAt);
+            await m.createIndex(idxProjectsUser);
+            await m.addColumn(aiPlans, aiPlans.expiredAt);
+          }
         },
         beforeOpen: (details) async {
           // F3：消息独立于会话（无外键约束、无级联删除），删除与同步统一由应用层
-          // 负责，M2 起改用同步墓碑；因此不再设置未生效的 PRAGMA foreign_keys，
-          // 避免给人「存在外键约束」的错觉。消息表的会话 ID 索引见 Messages 表定义。
-          // 任务与 AI 计划同样无外键：幽灵消息/孤儿任务合法，利于 M2 同步墓碑。
+          // 负责；M2a 起写路径统一入同步队列，实体删除统一改用同步墓碑。因此不再
+          // 设置未生效的 PRAGMA foreign_keys，避免给人「存在外键约束」的错觉。
+          // 任务、AI 计划、日历条目、项目同样无外键：幽灵消息/孤儿任务合法，利于
+          // M2 同步墓碑。
           // F10：启用 WAL 提升并发读性能；内存库会忽略该设置，不影响测试。
           await customStatement('PRAGMA journal_mode = WAL');
         },

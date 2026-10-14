@@ -6,12 +6,21 @@ import 'core/time/clock.dart';
 import 'data/ai/openai_client.dart';
 import 'data/local/ai_plan_repository_impl.dart';
 import 'data/local/app_database.dart';
+import 'data/local/calendar_entry_repository_impl.dart';
 import 'data/local/conversation_repository_impl.dart';
+import 'data/local/identity_store.dart';
+import 'data/local/memory_identity_store.dart';
 import 'data/local/persistent_settings_store.dart';
+import 'data/local/project_repository_impl.dart';
+import 'data/local/sync_operation_repository_impl.dart';
 import 'data/local/task_repository_impl.dart';
 import 'data/memory/memory_ai_plan_repository.dart';
+import 'data/memory/memory_calendar_entry_repository.dart';
 import 'data/memory/memory_conversation_repository.dart';
+import 'data/memory/memory_project_repository.dart';
 import 'data/memory/memory_settings_store.dart';
+import 'data/memory/memory_store.dart';
+import 'data/memory/memory_sync_operation_repository.dart';
 import 'data/memory/memory_task_repository.dart';
 import 'data/storage/memory_secret_store.dart';
 import 'data/storage/secret_store.dart';
@@ -20,8 +29,11 @@ import 'domain/ai/ai_client.dart';
 import 'domain/entities/ai_plan.dart';
 import 'domain/entities/ai_provider.dart';
 import 'domain/repositories/ai_plan_repository.dart';
+import 'domain/repositories/calendar_entry_repository.dart';
 import 'domain/repositories/conversation_repository.dart';
+import 'domain/repositories/project_repository.dart';
 import 'domain/repositories/settings_store.dart';
+import 'domain/repositories/sync_operation_repository.dart';
 import 'domain/repositories/task_repository.dart';
 
 /// 全局依赖容器。
@@ -29,7 +41,8 @@ final GetIt getIt = GetIt.instance;
 
 /// 注册生产依赖：Drift 仓储 + OpenAI 客户端 + 持久化设置存储。
 ///
-/// 启动顺序：`await settingsStore.load()` 把持久化配置加载进内存缓存 →
+/// 启动顺序：加载匿名身份（首启生成并持久化，B1）→ 用同一 `userId`/`deviceId`
+/// 构造全部仓储 → `await settingsStore.load()` 加载持久化配置 →
 /// `ensureDefaultConversation()` 保证存在默认会话（幂等）。除此之外不做其他启动工作。
 Future<void> configureDependencies() async {
   // F9：以真正的数据库单例为幂等标志，避免依赖「先注册 MemorySettingsStore」
@@ -38,28 +51,81 @@ Future<void> configureDependencies() async {
     return;
   }
 
-  // 单例数据库：ConversationRepositoryImpl 与 AIPlanRepositoryImpl 必须共享它，
-  // 否则 Drift 的嵌套事务无法复用外层，confirm 的原子性不成立（§7）。
+  // 单例数据库：全部 Drift 仓储必须共享它，否则 Drift 的嵌套事务无法复用外层，
+  // confirm/markExpired 的原子性不成立（§7）。
   final database = AppDatabase.open();
   getIt.registerSingleton<AppDatabase>(database, dispose: (db) => db.close());
 
   // 平台安全存储。构造本身不读平台通道；平台访问只发生在 load / saveApiKey。
   getIt.registerLazySingleton<SecretStore>(() => SecureStorageSecretStore());
 
+  // 稳定匿名身份：首启生成并持久化，之后恒定；注入全部仓储（B1/§5.4）。
+  final identity = PersistentIdentityStore();
+  await identity.load();
+  getIt.registerSingleton<IdentityStore>(identity);
+  final userId = identity.userId;
+  final deviceId = identity.deviceId;
+
   const clock = SystemClock();
 
+  // 同步队列：单例，注入全部写路径仓储（会话/任务/计划/日历/项目），
+  // 使「实体写入 + 入队」复用同一事务（§7.1）。
+  final syncOperationRepository = SyncOperationRepositoryImpl(
+    database,
+    clock,
+    userId: userId,
+    deviceId: deviceId,
+  );
+  getIt.registerSingleton<SyncOperationRepository>(syncOperationRepository);
+
   getIt.registerLazySingleton<ConversationRepository>(
-    () => ConversationRepositoryImpl(getIt<AppDatabase>(), clock),
+    () => ConversationRepositoryImpl(
+      getIt<AppDatabase>(),
+      clock,
+      syncOperationRepository: syncOperationRepository,
+      userId: userId,
+      deviceId: deviceId,
+    ),
   );
 
-  final taskRepository = TaskRepositoryImpl(database, clock);
+  final taskRepository = TaskRepositoryImpl(
+    database,
+    clock,
+    syncOperationRepository: syncOperationRepository,
+    userId: userId,
+    deviceId: deviceId,
+  );
   getIt.registerSingleton<TaskRepository>(taskRepository);
+
+  getIt.registerLazySingleton<CalendarEntryRepository>(
+    () => CalendarEntryRepositoryImpl(
+      getIt<AppDatabase>(),
+      clock,
+      syncOperationRepository: syncOperationRepository,
+      userId: userId,
+      deviceId: deviceId,
+    ),
+  );
 
   getIt.registerLazySingleton<AIPlanRepository>(
     () => AIPlanRepositoryImpl(
       getIt<AppDatabase>(),
       getIt<TaskRepository>(),
       clock,
+      syncOperationRepository: syncOperationRepository,
+      calendarEntryRepository: getIt<CalendarEntryRepository>(),
+      userId: userId,
+      deviceId: deviceId,
+    ),
+  );
+
+  getIt.registerLazySingleton<ProjectRepository>(
+    () => ProjectRepositoryImpl(
+      getIt<AppDatabase>(),
+      clock,
+      syncOperationRepository: syncOperationRepository,
+      userId: userId,
+      deviceId: deviceId,
     ),
   );
 
@@ -93,6 +159,9 @@ Future<void> resetDependenciesForTest({
   MemoryTaskRepository? taskRepository,
   MemoryAIPlanRepository? aiPlanRepository,
   MemorySettingsStore? settingsStore,
+  MemorySyncOperationRepository? syncOperationRepository,
+  MemoryCalendarEntryRepository? calendarEntryRepository,
+  MemoryProjectRepository? projectRepository,
 }) async {
   await getIt.reset();
 
@@ -106,20 +175,86 @@ Future<void> resetDependenciesForTest({
 
   getIt.registerSingleton<AIClient>(aiClient ?? const _StubAIClient());
 
-  final conversation = conversationRepository ?? MemoryConversationRepository();
+  // 固定身份，替代生产持久化身份；全部内存仓储共享同一 userId/deviceId（B1）。
+  final identity = MemoryIdentityStore();
+  await identity.load();
+  getIt.registerSingleton<MemoryIdentityStore>(identity);
+  getIt.registerSingleton<IdentityStore>(identity);
+
+  const clock = SystemClock();
+
+  // 全或无接缝：会话/任务/计划/日历/项目内存仓储 + 同步队列注册到同一
+  // MemoryStore，使跨仓储写（含 confirm/markExpired）可回滚（§7.2）。
+  final memoryStore = MemoryStore();
+
+  final syncOps = syncOperationRepository ??
+      MemorySyncOperationRepository(
+        clock: clock,
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        store: memoryStore,
+      );
+  getIt.registerSingleton<MemorySyncOperationRepository>(syncOps);
+  getIt.registerSingleton<SyncOperationRepository>(syncOps);
+
+  final conversation = conversationRepository ??
+      MemoryConversationRepository(
+        syncOperationRepository: syncOps,
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        store: memoryStore,
+      );
   // 预置默认会话，替代 HomeScreen 的 initState 引导（S12）。
   await conversation.ensureDefaultConversation();
   getIt.registerSingleton<ConversationRepository>(conversation);
 
   // 同一 MemoryTaskRepository 实例注入 MemoryAIPlanRepository，
   // 保证内存 confirm 的全或无语义（S2/S9）。
-  final tasks = taskRepository ?? MemoryTaskRepository();
+  final tasks = taskRepository ??
+      MemoryTaskRepository(
+        syncOperationRepository: syncOps,
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        store: memoryStore,
+      );
   getIt.registerSingleton<MemoryTaskRepository>(tasks);
   getIt.registerSingleton<TaskRepository>(tasks);
 
+  // 先装配日历仓储，再把同一实例注入 MemoryAIPlanRepository，
+  // 使 confirm 物化日程与计划/任务/队列共享同一原子接缝（§7.2/§10）。
+  final calendar = calendarEntryRepository ??
+      MemoryCalendarEntryRepository(
+        syncOperationRepository: syncOps,
+        clock: clock,
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        store: memoryStore,
+      );
+  getIt.registerSingleton<MemoryCalendarEntryRepository>(calendar);
+  getIt.registerSingleton<CalendarEntryRepository>(calendar);
+
   getIt.registerSingleton<AIPlanRepository>(
-    aiPlanRepository ?? MemoryAIPlanRepository(tasks),
+    aiPlanRepository ??
+        MemoryAIPlanRepository(
+          tasks,
+          syncOperationRepository: syncOps,
+          calendarEntryRepository: calendar,
+          memoryStore: memoryStore,
+          userId: identity.userId,
+          deviceId: identity.deviceId,
+        ),
   );
+
+  final projects = projectRepository ??
+      MemoryProjectRepository(
+        syncOperationRepository: syncOps,
+        clock: clock,
+        userId: identity.userId,
+        deviceId: identity.deviceId,
+        store: memoryStore,
+      );
+  getIt.registerSingleton<MemoryProjectRepository>(projects);
+  getIt.registerSingleton<ProjectRepository>(projects);
 }
 
 /// 测试用假客户端：绝不触网。

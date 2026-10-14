@@ -1,6 +1,7 @@
 import 'package:chatwithalice/core/time/clock.dart';
 import 'package:chatwithalice/data/local/app_database.dart';
 import 'package:chatwithalice/data/local/conversation_repository_impl.dart';
+import 'package:chatwithalice/data/local/sync_operation_repository_impl.dart';
 import 'package:chatwithalice/domain/entities/conversation.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -44,6 +45,12 @@ void main() {
     repository = ConversationRepositoryImpl(
       database,
       clock,
+      syncOperationRepository: SyncOperationRepositoryImpl(
+        database,
+        clock,
+        userId: 'user-1',
+        deviceId: 'device-1',
+      ),
       userId: 'user-1',
       deviceId: 'device-1',
     );
@@ -66,7 +73,7 @@ void main() {
     expect((await repository.getConversations()).length, 1);
   });
 
-  test('addMessage 更新会话摘要与版本', () async {
+  test('addMessage 更新会话摘要但不 bump 会话版本（§7.4）', () async {
     final conversation = await repository.createConversation(title: '测试');
     clock.current = clock.current.add(const Duration(minutes: 1));
 
@@ -80,7 +87,8 @@ void main() {
     final updated = await repository.getConversation(conversation.id);
     expect(updated!.lastMessagePreview, '第一条消息');
     expect(updated.lastMessageAt, clock.current);
-    expect(updated.version, 2);
+    expect(updated.version, conversation.version);
+    expect(updated.updatedAt, conversation.updatedAt);
   });
 
   test('长消息预览截断到 50 字', () async {
@@ -118,7 +126,7 @@ void main() {
     await future;
   });
 
-  test('clearMessages 物理删除消息', () async {
+  test('clearMessages 墓碑化消息，查询不再返回（§8）', () async {
     final conversation = await repository.createConversation(title: '测试');
     await repository.addMessage(_message(conversation.id, 'a'));
     clock.current = clock.current.add(const Duration(minutes: 1));
