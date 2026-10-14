@@ -150,6 +150,28 @@ class MemoryProjectRepository
     );
   }
 
+  /// 数据层内部「原始写入」接缝（Lane-B §6.3）：以远端快照覆盖本地项目，
+  /// **不入同步队列**；写入后广播变更流（UI 刷新）。按 id 覆盖或新增。
+  void applyRemoteSnapshot(Project project) {
+    final index = _indexOf(project.id);
+    if (index < 0) {
+      _projects.add(project);
+    } else {
+      _projects[index] = project;
+    }
+    _notify();
+  }
+
+  /// 读取项目当前版本/更新时间；不存在返回 null（供 LWW）。
+  ({int version, DateTime updatedAt})? localVersionOf(String id) {
+    final index = _indexOf(id);
+    if (index < 0) {
+      return null;
+    }
+    final project = _projects[index];
+    return (version: project.version, updatedAt: project.updatedAt);
+  }
+
   @override
   Object? snapshot() => List<Project>.of(_projects);
 

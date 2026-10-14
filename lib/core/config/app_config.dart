@@ -27,6 +27,27 @@ abstract final class AppConfig {
     'gpt-4o-mini',
     'gpt-4o',
   ];
+
+  /// 默认同步服务地址；空串 = 未启用（同步引擎内部空转，不触网）。
+  static const String defaultSyncBaseUrl = '';
+
+  /// 单批推送操作上限（§5.2/§6.1）。
+  static const int syncPushBatchSize = 100;
+
+  /// 单次拉取条数上限（§5.3/§6.1）。
+  static const int syncPullLimit = 200;
+
+  /// 单次同步的推送循环最大轮数（§6.1，A2）。
+  static const int maxPushPasses = 5;
+
+  /// 单次同步的拉取分页最大轮数（§6.1）。
+  static const int maxPullPages = 10;
+
+  /// 自动同步退避基数（§6.1/§9.3）。
+  static const Duration syncBackoffBase = Duration(seconds: 30);
+
+  /// 自动同步退避上限（§6.1/§9.3）。
+  static const Duration syncBackoffMax = Duration(minutes: 10);
 }
 
 /// AI 待确认计划的自动过期时长（M2a §9，默认 48 小时）。

@@ -71,6 +71,31 @@ class SyncOperationRepositoryImpl implements SyncOperationRepository {
         .write(_toCompanion(operation));
   }
 
+  @override
+  Future<void> deleteSynced() async {
+    await (_db.delete(_db.syncOperations)
+          ..where((t) => t.status.equals(SyncOperationStatus.synced.name)))
+        .go();
+  }
+
+  @override
+  Future<void> deleteConflicted() async {
+    await (_db.delete(_db.syncOperations)
+          ..where((t) => t.status.equals(SyncOperationStatus.conflicted.name)))
+        .go();
+  }
+
+  @override
+  Future<void> requeueFailed() async {
+    // failed → pending，并清空 lastError（Value(null) 显式写 NULL）。
+    await (_db.update(_db.syncOperations)
+          ..where((t) => t.status.equals(SyncOperationStatus.failed.name)))
+        .write(SyncOperationsCompanion(
+          status: Value(SyncOperationStatus.pending.name),
+          lastError: const Value(null),
+        ));
+  }
+
   SimpleSelectStatement<$SyncOperationsTable, SyncOperationRow> _pendingQuery() {
     return _db.select(_db.syncOperations)
       ..where((t) => t.status.equals(SyncOperationStatus.pending.name))

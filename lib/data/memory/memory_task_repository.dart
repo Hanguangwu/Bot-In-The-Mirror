@@ -201,6 +201,28 @@ class MemoryTaskRepository implements TaskRepository, MemoryStoreParticipant {
     });
   }
 
+  /// 数据层内部「原始写入」接缝（Lane-B §6.3）：以远端快照覆盖本地任务，
+  /// **不入同步队列**；写入后广播变更流（UI 刷新）。按 id 覆盖或新增。
+  void applyRemoteSnapshot(Task task) {
+    final index = _indexOf(task.id);
+    if (index < 0) {
+      _tasks.add(task);
+    } else {
+      _tasks[index] = task;
+    }
+    _notify();
+  }
+
+  /// 读取任务当前版本/更新时间；不存在返回 null（供 LWW）。
+  ({int version, DateTime updatedAt})? localVersionOf(String id) {
+    final index = _indexOf(id);
+    if (index < 0) {
+      return null;
+    }
+    final task = _tasks[index];
+    return (version: task.version, updatedAt: task.updatedAt);
+  }
+
   @override
   Object? snapshot() => List<Task>.of(_tasks);
 

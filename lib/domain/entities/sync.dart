@@ -106,6 +106,7 @@ class SyncOperation extends SyncableEntity {
     SyncOperationStatus? status,
     int? retryCount,
     String? lastError,
+    bool clearLastError = false,
     DateTime? syncedAt,
   }) {
     return SyncOperation(
@@ -122,7 +123,8 @@ class SyncOperation extends SyncableEntity {
       payload: payload ?? this.payload,
       status: status ?? this.status,
       retryCount: retryCount ?? this.retryCount,
-      lastError: lastError ?? this.lastError,
+      // lastError 无法经 `copyWith(lastError: null)` 置空：统一用 clearLastError（M1 约定）。
+      lastError: clearLastError ? null : (lastError ?? this.lastError),
       syncedAt: syncedAt ?? this.syncedAt,
     );
   }
@@ -149,7 +151,7 @@ class SyncReport {
   final int failed;
 
   /// 新的同步游标；无拉取时为 null。
-  final String? cursor;
+  final int? cursor;
 
   /// 报告生成时间。
   final DateTime at;
@@ -159,7 +161,7 @@ class SyncReport {
     int? pushed,
     int? pulled,
     int? failed,
-    String? cursor,
+    int? cursor,
     DateTime? at,
   }) {
     return SyncReport(

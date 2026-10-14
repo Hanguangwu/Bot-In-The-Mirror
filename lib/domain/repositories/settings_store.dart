@@ -20,4 +20,10 @@ abstract interface class SettingsStore {
 
   /// 保存 API Key（明文 key 走 SecretStore）。
   Future<void> saveApiKey(String apiKey);
+
+  /// 同步服务基址；空串表示未配置（同步引擎内部空转，不触网，§9.3）。
+  String get syncBaseUrl;
+
+  /// 保存同步服务基址。
+  Future<void> saveSyncBaseUrl(String url);
 }

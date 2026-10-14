@@ -14,7 +14,9 @@ sealed class AppException implements Exception {
   final String message;
 
   /// 机器可读错误码：
-  /// validation / network / ai_provider / storage / not_found / unsupported。
+  /// validation / network / ai_provider / storage / not_found / unsupported /
+  /// planInvalid / conflict / sync_network / sync_decode；`SyncApiException.code`
+  /// 为远端错误码。
   final String code;
 
   /// 原始错误（异常对象或摘要），仅用于日志排查，不直接展示给用户。
@@ -105,4 +107,45 @@ class ConflictException extends AppException {
   /// 创建冲突异常。
   const ConflictException(super.message, {super.cause})
       : super(code: 'conflict');
+}
+
+/// 同步 API 返回非 2xx 或错误体（§6.4）。
+///
+/// [code] 为远端错误码（如 `invalid_identity`/`invalid_cursor`），
+/// [statusCode] 为 HTTP 状态码。响应体摘要仅用于日志，禁止展示明文 token。
+class SyncApiException extends AppException {
+  /// 创建同步 API 异常。
+  const SyncApiException(
+    super.message, {
+    required super.code,
+    this.statusCode,
+    super.cause,
+  });
+
+  /// HTTP 状态码；非 HTTP 错误时为 null。
+  final int? statusCode;
+
+  @override
+  String toString() {
+    final buffer = StringBuffer(code);
+    if (statusCode != null) {
+      buffer.write('[$statusCode]');
+    }
+    buffer.write(': $message');
+    return buffer.toString();
+  }
+}
+
+/// 同步网络异常（超时、连接失败、无网络等，§6.4/§7.4）。
+class SyncNetworkException extends AppException {
+  /// 创建同步网络异常。
+  const SyncNetworkException(super.message, {super.cause})
+      : super(code: 'sync_network');
+}
+
+/// 同步数据解析失败（快照结构/类型/枚举非法，§6.4）。
+class SyncDecodeException extends AppException {
+  /// 创建同步解码异常。
+  const SyncDecodeException(super.message, {super.cause})
+      : super(code: 'sync_decode');
 }

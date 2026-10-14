@@ -26,6 +26,9 @@ class PersistentSettingsStore implements SettingsStore {
   /// API Key 在 [SecretStore] 中的 key。
   static const String apiKeyKey = 'ai_api_key';
 
+  /// 同步服务基址的 shared_preferences key。
+  static const String syncBaseUrlKey = 'sync_base_url';
+
   final SecretStore _secretStore;
   SharedPreferences? _preferences;
 
@@ -33,6 +36,7 @@ class PersistentSettingsStore implements SettingsStore {
       StreamController<AIProviderProfile>.broadcast();
   AIProviderProfile _profile = _defaultProfile();
   String _apiKey = '';
+  String _syncBaseUrl = AppConfig.defaultSyncBaseUrl;
 
   /// 默认配置（与 `AppConfig` 及 `MemorySettingsStore` 一致）。
   static AIProviderProfile _defaultProfile() => const AIProviderProfile(
@@ -63,6 +67,8 @@ class PersistentSettingsStore implements SettingsStore {
       }
     }
     _apiKey = await _secretStore.read(apiKeyKey) ?? '';
+    _syncBaseUrl =
+        preferences.getString(syncBaseUrlKey) ?? AppConfig.defaultSyncBaseUrl;
   }
 
   @override
@@ -79,6 +85,16 @@ class PersistentSettingsStore implements SettingsStore {
   Future<void> saveApiKey(String apiKey) async {
     _apiKey = apiKey;
     await _secretStore.write(apiKeyKey, apiKey);
+  }
+
+  @override
+  String get syncBaseUrl => _syncBaseUrl;
+
+  @override
+  Future<void> saveSyncBaseUrl(String url) async {
+    _syncBaseUrl = url;
+    final preferences = _preferences ??= await SharedPreferences.getInstance();
+    await preferences.setString(syncBaseUrlKey, url);
   }
 
   /// 释放内部流资源（仅测试/预览使用）。

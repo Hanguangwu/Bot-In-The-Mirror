@@ -26,6 +26,7 @@ class MemorySettingsStore implements SettingsStore {
       StreamController<AIProviderProfile>.broadcast();
   AIProviderProfile _profile;
   String _apiKey;
+  String _syncBaseUrl = AppConfig.defaultSyncBaseUrl;
 
   @override
   AIProviderProfile get currentProfile => _profile;
@@ -53,6 +54,15 @@ class MemorySettingsStore implements SettingsStore {
   @override
   Future<void> saveApiKey(String apiKey) async {
     _apiKey = apiKey;
+  }
+
+  /// 同步服务基址；空串表示未配置（§9.3）。
+  @override
+  String get syncBaseUrl => _syncBaseUrl;
+
+  @override
+  Future<void> saveSyncBaseUrl(String url) async {
+    _syncBaseUrl = url;
   }
 
   /// 释放内部流资源（仅测试/预览使用）。

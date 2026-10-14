@@ -539,7 +539,7 @@ void main() {
       final report = SyncReport(pushed: 2, pulled: 3, failed: 0, at: _t1);
       expect(report.pushed, 2);
       expect(report.cursor, isNull);
-      expect(report.copyWith(cursor: 'c1').cursor, 'c1');
+      expect(report.copyWith(cursor: 7).cursor, 7);
     });
   });
 }

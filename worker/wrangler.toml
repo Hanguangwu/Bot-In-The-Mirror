@@ -1,0 +1,18 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "chatwithalice-sync"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# 真实部署前请填入 Cloudflare 账号 ID（占位，勿提交真实值）：
+# account_id = "<YOUR_CLOUDFLARE_ACCOUNT_ID>"
+
+# 唯一远程入口（基线 §6.2）：客户端只经 Worker 访问，不直连 D1。
+[[d1_databases]]
+binding = "DB"
+database_name = "chatwithalice-sync"
+# 占位 ID：真实部署前用 `wrangler d1 create chatwithalice-sync` 生成的 ID 替换。
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true

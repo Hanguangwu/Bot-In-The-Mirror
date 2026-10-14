@@ -149,6 +149,78 @@ void _runContract(
       expect(await repository.getPending(), isEmpty);
     });
 
+    test('deleteSynced 仅删 synced，pending 保留；删除后 mark 不复活', () async {
+      await repository.enqueue(_op(id: 'p1', entityId: 'p1'));
+      await repository.enqueue(
+        _op(id: 's1', entityId: 's1', status: SyncOperationStatus.synced),
+      );
+      await repository.enqueue(
+        _op(id: 'f1', entityId: 'f1', status: SyncOperationStatus.failed),
+      );
+
+      await repository.deleteSynced();
+
+      expect(
+        (await repository.getPending()).map((op) => op.id).toList(),
+        <String>['p1'],
+      );
+
+      // synced 行已删除：mark(pending) 无匹配行，不复活。
+      await repository.mark(
+        _op(id: 's1', entityId: 's1', status: SyncOperationStatus.pending),
+      );
+      expect(
+        (await repository.getPending()).map((op) => op.id).toList(),
+        <String>['p1'],
+      );
+    });
+
+    test('deleteConflicted 仅删 conflicted，pending 保留；删除后 mark 不复活', () async {
+      await repository.enqueue(_op(id: 'p1', entityId: 'p1'));
+      await repository.enqueue(
+        _op(id: 'c1', entityId: 'c1', status: SyncOperationStatus.conflicted),
+      );
+
+      await repository.deleteConflicted();
+
+      expect(
+        (await repository.getPending()).map((op) => op.id).toList(),
+        <String>['p1'],
+      );
+
+      // conflicted 行已删除：mark(pending) 无匹配行，不复活。
+      await repository.mark(
+        _op(id: 'c1', entityId: 'c1', status: SyncOperationStatus.pending),
+      );
+      expect(
+        (await repository.getPending()).map((op) => op.id).toList(),
+        <String>['p1'],
+      );
+    });
+
+    test('requeueFailed：failed → pending 且清 lastError；pending 保留', () async {
+      await repository.enqueue(_op(id: 'p1', entityId: 'p1'));
+      await repository.enqueue(
+        _op(
+          id: 'f1',
+          entityId: 'f1',
+          status: SyncOperationStatus.failed,
+          retryCount: 3,
+          lastError: '网络超时',
+        ),
+      );
+
+      await repository.requeueFailed();
+
+      final pending = await repository.getPending();
+      expect(pending.map((op) => op.id).toSet(), <String>{'p1', 'f1'});
+      final requeued = pending.firstWhere((op) => op.id == 'f1');
+      expect(requeued.status, SyncOperationStatus.pending);
+      expect(requeued.lastError, isNull);
+      // 重试计数保留（仅状态与错误复位）。
+      expect(requeued.retryCount, 3);
+    });
+
     test('watchPending 订阅时推送当前快照并随写入更新', () async {
       final future = expectLater(
         repository.watchPending(),

@@ -16,4 +16,13 @@ abstract interface class SyncOperationRepository {
 
   /// 更新操作状态/重试/错误（M2b 消费；本期仅测试用）。
   Future<void> mark(SyncOperation operation);
+
+  /// 推送成功后删除 `status==synced` 的操作（§6.5/§7.5）。
+  Future<void> deleteSynced();
+
+  /// 拉取收敛后删除 `status==conflicted` 的操作（§6.5/§7.5）。
+  Future<void> deleteConflicted();
+
+  /// 手动重试：`status==failed` → `pending`，并清 `lastError`（§6.5/§7.5）。
+  Future<void> requeueFailed();
 }

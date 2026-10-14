@@ -230,6 +230,28 @@ class MemoryAIPlanRepository implements AIPlanRepository, MemoryStoreParticipant
     });
   }
 
+  /// 数据层内部「原始写入」接缝（Lane-B §6.3）：以远端快照覆盖本地计划，
+  /// **不入同步队列**；写入后广播变更流（UI 刷新）。按 id 覆盖或新增。
+  void applyRemoteSnapshot(AIPlan plan) {
+    final index = _indexOf(plan.id);
+    if (index < 0) {
+      _plans.add(plan);
+    } else {
+      _plans[index] = plan;
+    }
+    _notify();
+  }
+
+  /// 读取计划当前版本/更新时间；不存在返回 null（供 LWW）。
+  ({int version, DateTime updatedAt})? localVersionOf(String id) {
+    final index = _indexOf(id);
+    if (index < 0) {
+      return null;
+    }
+    final plan = _plans[index];
+    return (version: plan.version, updatedAt: plan.updatedAt);
+  }
+
   @override
   Object? snapshot() => List<AIPlan>.of(_plans);
 

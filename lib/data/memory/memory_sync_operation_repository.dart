@@ -84,6 +84,44 @@ class MemorySyncOperationRepository
   }
 
   @override
+  Future<void> deleteSynced() async {
+    _deleteWhere((operation) => operation.status == SyncOperationStatus.synced);
+  }
+
+  @override
+  Future<void> deleteConflicted() async {
+    _deleteWhere(
+      (operation) => operation.status == SyncOperationStatus.conflicted,
+    );
+  }
+
+  @override
+  Future<void> requeueFailed() async {
+    var changed = false;
+    for (var i = 0; i < _operations.length; i++) {
+      if (_operations[i].status == SyncOperationStatus.failed) {
+        _operations[i] = _operations[i].copyWith(
+          status: SyncOperationStatus.pending,
+          clearLastError: true,
+        );
+        changed = true;
+      }
+    }
+    if (changed) {
+      _notify();
+    }
+  }
+
+  /// 删除满足 [test] 的操作；有删除才广播。
+  void _deleteWhere(bool Function(SyncOperation operation) test) {
+    final before = _operations.length;
+    _operations.removeWhere(test);
+    if (_operations.length != before) {
+      _notify();
+    }
+  }
+
+  @override
   Object? snapshot() => List<SyncOperation>.of(_operations);
 
   @override

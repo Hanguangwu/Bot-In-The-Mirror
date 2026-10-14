@@ -6,6 +6,7 @@ import '../../di.dart';
 import '../../domain/ai/ai_client.dart';
 import '../../domain/entities/ai_provider.dart';
 import '../../domain/repositories/settings_store.dart';
+import '../sync/sync_status_screen.dart';
 
 /// 设置页：配置 AI 模型参数，支持测试连接与保存。
 class SettingsScreen extends StatefulWidget {
@@ -199,6 +200,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       )
                     : const Icon(Icons.wifi_tethering),
                 label: Text(_isTesting ? '测试中...' : '测试连接'),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Card(
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: ListTile(
+                leading: const Icon(Icons.sync),
+                title: const Text('同步'),
+                subtitle: const Text('云端同步状态、手动触发与服务地址配置'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SyncStatusScreen(),
+                  ),
+                ),
               ),
             ),
             const SizedBox(height: 20),

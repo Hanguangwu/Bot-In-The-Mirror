@@ -296,6 +296,63 @@ class MemoryConversationRepository
     });
   }
 
+  /// 数据层内部「原始写入」接缝（Lane-B §6.3）：以远端快照覆盖本地会话，
+  /// **不入同步队列**；写入后广播变更流（UI 刷新）。
+  ///
+  /// 语义与 Drift 实现的**列级写入**等价：快照不含
+  /// `lastMessagePreview`/`lastMessageAt`，行已存在时保留本地派生列；本地无
+  /// 该行则按快照插入（派生列为 null）。
+  void applyRemoteConversation(Conversation conversation) {
+    final index = _conversations.indexWhere(
+      (item) => item.id == conversation.id,
+    );
+    if (index < 0) {
+      _conversations.add(conversation);
+    } else {
+      final existing = _conversations[index];
+      // 仅保留本地派生列；其余字段取远端快照（不触发入队）。
+      _conversations[index] = conversation.copyWith(
+        lastMessagePreview: existing.lastMessagePreview,
+        lastMessageAt: existing.lastMessageAt,
+      );
+    }
+    _notify();
+  }
+
+  /// 数据层内部「原始写入」接缝：以远端快照覆盖本地消息，**不入同步队列**。
+  void applyRemoteMessage(Message message) {
+    final index = _messages.indexWhere((item) => item.id == message.id);
+    if (index < 0) {
+      _messages.add(message);
+    } else {
+      _messages[index] = message;
+    }
+    _notify();
+  }
+
+  /// 读取指定会话当前版本/更新时间；不存在返回 null（供 LWW）。
+  ({int version, DateTime updatedAt})? localVersionOfConversation(String id) {
+    for (final conversation in _conversations) {
+      if (conversation.id == id) {
+        return (
+          version: conversation.version,
+          updatedAt: conversation.updatedAt,
+        );
+      }
+    }
+    return null;
+  }
+
+  /// 读取指定消息当前版本/更新时间；不存在返回 null（供 LWW）。
+  ({int version, DateTime updatedAt})? localVersionOfMessage(String id) {
+    for (final message in _messages) {
+      if (message.id == id) {
+        return (version: message.version, updatedAt: message.updatedAt);
+      }
+    }
+    return null;
+  }
+
   @override
   Object? snapshot() => <Object?>[
         List<Conversation>.of(_conversations),
