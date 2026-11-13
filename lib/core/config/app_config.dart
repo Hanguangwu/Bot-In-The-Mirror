@@ -20,14 +20,6 @@ abstract final class AppConfig {
   /// 应用版本（与 `pubspec.yaml` 保持一致）。
   static const String appVersion = '1.0.0';
 
-  /// 常见模型候选列表（静态兜底，动态获取是 M1）。
-  static const List<String> commonModels = <String>[
-    'gpt-3.5-turbo',
-    'gpt-4',
-    'gpt-4o-mini',
-    'gpt-4o',
-  ];
-
   /// 默认同步服务地址；空串 = 未启用（同步引擎内部空转，不触网）。
   static const String defaultSyncBaseUrl = '';
 

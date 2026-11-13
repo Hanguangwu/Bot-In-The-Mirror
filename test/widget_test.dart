@@ -3,6 +3,7 @@ import 'package:chatwithalice/data/memory/memory_project_repository.dart';
 import 'package:chatwithalice/data/memory/memory_task_repository.dart';
 import 'package:chatwithalice/di.dart';
 import 'package:chatwithalice/domain/entities/task.dart';
+import 'package:chatwithalice/domain/repositories/settings_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -164,6 +165,29 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.textContaining('API Key 已保存至安全存储'), findsOneWidget);
+  });
+
+  testWidgets('设置页可自定义 model_id 并保存', (tester) async {
+    await resetDependenciesForTest();
+    await tester.pumpWidget(const ChatWithAliceApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.settings));
+    await tester.pumpAndSettle();
+
+    final modelField =
+        find.widgetWithText(TextField, '模型名称 (model_id)');
+    expect(modelField, findsOneWidget);
+    await tester.enterText(modelField, 'my-custom-model');
+
+    final saveButton = find.text('保存设置');
+    await tester.ensureVisible(saveButton);
+    await tester.pumpAndSettle();
+    await tester.tap(saveButton);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(getIt<SettingsStore>().currentProfile.model, 'my-custom-model');
   });
 
   testWidgets('聊天页拆解按钮禁用态：无 user 消息的会话中按钮 onPressed == null', (tester) async {

@@ -23,8 +23,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _baseUrlController = TextEditingController();
   final TextEditingController _temperatureController = TextEditingController();
   final TextEditingController _maxTokensController = TextEditingController();
-  late String _selectedModel;
-  late List<String> _models;
+  final TextEditingController _modelController = TextEditingController();
   bool _isTesting = false;
 
   @override
@@ -35,11 +34,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrlController.text = profile.baseUrl;
     _temperatureController.text = profile.temperature.toString();
     _maxTokensController.text = profile.maxTokens.toString();
-    _selectedModel = profile.model;
-    _models = <String>[
-      if (!AppConfig.commonModels.contains(profile.model)) profile.model,
-      ...AppConfig.commonModels,
-    ];
+    _modelController.text = profile.model;
   }
 
   @override
@@ -48,6 +43,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrlController.dispose();
     _temperatureController.dispose();
     _maxTokensController.dispose();
+    _modelController.dispose();
     super.dispose();
   }
 
@@ -57,10 +53,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         double.tryParse(_temperatureController.text) ?? AppConfig.defaultTemperature;
     final maxTokens =
         int.tryParse(_maxTokensController.text) ?? AppConfig.defaultMaxTokens;
+    final model = _modelController.text.trim();
     return AIProviderProfile(
       name: '默认',
       baseUrl: _baseUrlController.text.trim(),
-      model: _selectedModel,
+      model: model.isEmpty ? AppConfig.defaultModel : model,
       temperature: temperature,
       maxTokens: maxTokens,
     );
@@ -147,8 +144,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 20),
-            _buildModelSelector(),
-            const SizedBox(height: 20),
+            _buildTextField(
+              label: '模型名称 (model_id)',
+              controller: _modelController,
+              hint: 'gpt-3.5-turbo',
+            ),
+            const SizedBox(height: 15),
             _buildTextField(
               label: 'API密钥',
               controller: _apiKeyController,
@@ -255,27 +256,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildModelSelector() {
-    return DropdownButtonFormField<String>(
-      decoration: const InputDecoration(
-        labelText: '模型',
-        border: OutlineInputBorder(),
-      ),
-      initialValue: _selectedModel,
-      items: _models.map((model) {
-        return DropdownMenuItem<String>(
-          value: model,
-          child: Text(model),
-        );
-      }).toList(),
-      onChanged: (value) {
-        if (value != null) {
-          setState(() => _selectedModel = value);
-        }
-      },
     );
   }
 
